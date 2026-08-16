@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 function Step($m) { Write-Host "==> $m" }
 $removed = @()
 
-# manifest（Codex C2）：install 记录 managed 文件 hash；卸载只删 hash 未变的文件，用户修改过的保留并报告
+# manifest：install 记录 managed 文件 hash；卸载只删 hash 未变的文件，用户修改过的保留并报告
 $manifest = $null
 $manifestPath = Join-Path $ProjectRoot '.baton\manifest.json'
 if (Test-Path $manifestPath) {

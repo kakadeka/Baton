@@ -88,7 +88,7 @@ dsh plugin --profile web add @kakadeka/dsh-baton
 | 16 | Reuse/share the system with a new project | Framework and project instance fully separated; `Baton init` one-shot bootstrap; share via sanitizing pipeline (no keys/paths/private notes) |
 | 17 | Other skills installed that bypass project rules | External skills may help, but project boundaries (paths, design specs, git discipline) are enforced by Baton, coordinated with AGENTS.md |
 
-## ✨ Features (8 capability blocks)
+## ✨ Features
 
 - **Command automation** — clock in / clock out / continue work / save design spec / complete task / update project docs / remember / Baton init / number confirm / git natural language
 - **Cross-AI & cross-machine** — plain-text project truth + one-command thin adapters (Codex/Claude/Cursor) + handoff relay
@@ -98,6 +98,10 @@ dsh plugin --profile web add @kakadeka/dsh-baton
 - **Auto model routing** — task tier × rule table (flash/pro + high/max + fallback); recommended vs actual recorded transparently
 - **Monthly dashboard** — model rankings / hourly activity / daily detail / agent detail, from real execution data
 - **One-click acceptance** — `baton_accept`: skeleton/state/security/volume checks → PASS/FAIL + blocking list
+- **Lean implementation gate** — per-task `implementation_policy` (`off`/`lite`/`full`/`strict`): in strict mode new dependencies/files/abstractions are budgeted mechanically and over-budget closeout is blocked until the user confirms an exception
+- **Specialist skills** — `lean-review` (over-engineering audit), `debt` (tech-debt scan), `doctor` (health check: version/drift/lock/publish surface) — all read-only, installed alongside the main skill
+- **Credential hygiene** — every persisted input is scanned; secrets never reach Git, memory, metrics or logs
+- **Trusted publishing** — npm releases ship with SLSA provenance (OIDC, tag-triggered)
 
 ## 🗣️ Commands (when to use each)
 
@@ -118,6 +122,7 @@ Say any of these English phrases — the meaning is identical in every AI. Chine
 | **pull github** / *sync github* / *check git status* | manual git intent | lightweight git path, no contract/review ceremony |
 | **check update** | wondering if a new Baton version exists | read local version anchor + query GitHub/npm for the latest, report up-to-date or new version |
 | **update baton** / *upgrade baton* | a new version is out | AI runs the full update (git pull + re-run install script / npm update) and verifies local == remote |
+| **lean review** / **scan debt** / **run doctor** | want a code audit / tech-debt list / health check | runs the read-only specialist skill (over-engineering review / `BATON-DEBT` scan / version-drift-lock diagnosis) |
 
 ## 🛠️ Install for other AI tools (Codex / Claude / Cursor)
 
@@ -206,6 +211,17 @@ The installer leaves a **version anchor** for you: user-level installs write `ve
 | **update baton** | with a newer version available, AI runs the full update (git pull + re-run install script / npm update) and verifies the local version matches the remote before reporting done |
 
 Tip: every **clock in**, if you haven't checked for updates in 7 days, Baton adds a one-line "you may check update" nudge. SKILL changes take effect in a **new session**; DSH bundle updates require a restart.
+
+### Step 6: Uninstall (safe, never touches your content)
+
+```powershell
+pwsh -File $HOME\Baton\scripts\baton-uninstall.ps1 -ProjectRoot C:\your\project\path
+```
+
+- Removes only what the installer created: the three skill mirrors, the entry segments (only the marker-bounded span), and the version anchor.
+- Your memory (`docs/ai_memory/`) and config are kept by default — they are your project's truth. Add `-RemoveMemory` only when you really want them gone.
+- Files you have edited since install are detected by content hash and kept, with a notice — never deleted silently.
+- `-DryRun` shows exactly what would happen without writing anything.
 
 ### What the one-click script does (transparent)
 

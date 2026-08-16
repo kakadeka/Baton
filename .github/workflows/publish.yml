@@ -25,5 +25,11 @@ jobs:
         run: npm install -g npm@latest
       - name: Drift check
         run: node scripts/check-drift.mjs
-      - name: Publish to npm (OIDC provenance)
-        run: npm publish --provenance --access public
+      - name: Publish to npm (OIDC provenance, idempotent)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "@kakadeka/dsh-baton@$VERSION" version >/dev/null 2>&1; then
+            echo "npm version $VERSION already exists — skipping publish (idempotent)"
+          else
+            npm publish --provenance --access public
+          fi

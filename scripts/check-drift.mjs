@@ -38,7 +38,7 @@ for (const s of ['baton', 'baton-lean-review', 'baton-debt', 'baton-doctor']) {
 }
 if (!fails.some((f) => f.indexOf('漂移') !== -1)) console.log('PASS  skill 各 canonical 与三端镜像一致')
 
-// invariant canary：核心红线不可从 SKILL 消失——机械防「改坏规则」回归。
+// invariant canary：核心红线不可从 SKILL 消失——机械防核心红线被误删。
 // 注：只查公开面应有的通用红线；框架内部规则不在本清单。
 const canaries = [
   ['单写入者', '单写入者锁'],
@@ -80,7 +80,7 @@ if (readmeText !== null) {
     const m = /<!--\s*baton-src:\s*README\.md\s+sha256:([0-9a-f]+)\s+status:(current|stale)/.exec(first)
     if (m === null) fails.push('readme/' + name + ' 缺少译文 source hash 标记（首行需 <!-- baton-src: README.md sha256:' + readmeHash + ' status:current|stale -->）')
     else if (m[2] === 'current' && m[1] !== readmeHash) fails.push('readme/' + name + ' 标记 status=current 但 source hash 与 README.md 不符（重译后刷新 hash，或如实改标 status:stale）')
-    else if (m[2] === 'stale') console.log('INFO  readme/' + name + ' 已标 stale（' + m[1] + ' ≠ 当前 ' + readmeHash + '）')
+    else if (m[2] === 'stale') console.log('INFO  readme/' + name + ' 已标 stale（内容落后于当前 README.md，等待重译）')
   }
   if (checked === 0) console.log('INFO  无 README 译文文件（公开面最小发布场景）')
   else if (!fails.some((f) => f.indexOf('译文') !== -1)) console.log('PASS  译文 source hash 标记全部有效（' + checked + ' 份）')

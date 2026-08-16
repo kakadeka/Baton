@@ -1,4 +1,4 @@
-<!-- baton-src: README.md sha256:be1cbcf4ed42 status:current -->
+<!-- baton-src: README.md sha256:71680646d0ac status:stale -->
 # 🥁 Baton — 컨텍스트가 아니라 프로젝트를 넘기세요.
 
 <p align="center">

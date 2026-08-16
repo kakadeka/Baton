@@ -630,7 +630,7 @@ return {
       return r.exitCode === 0
     }
 
-    // A2（Codex 0.1.39 终验）：completed 前置证据门——accept 前必须同时成立：
+    // completed 前置证据门——accept 前必须同时成立：
     // ① Git 内执行证据（evidence.jsonl / .baton/evidence 有 source SHA 绑定且为 HEAD 祖先的行，跨机可见）；
     // ② task_finished 证据行存在且非占位。任一不成立 → 拒绝写 completed。
     async function taskEvidenceGate(rootPath, taskId) {
@@ -1032,7 +1032,7 @@ return {
           }
         }
         const branchMismatch = handoffBranch !== null && handoffBranch !== '' && handoffBranch !== git.branch
-        // fetch-before-lock（Codex 0.1.39 终验 B3 修复）：抢锁前必须观测到远端最新 tip——
+        // fetch-before-lock：抢锁前必须观测到远端最新 tip——
         // 本地 remote-tracking 陈旧会让 behind 误判为零而抢锁写 state（分裂脑）。
         // fetch 失败（网络受限/无凭据/远端不可达）→ 零写零锁 fail-closed，并给出主会话 fetch 命令。
         // 指向开源发布仓库的 remote 跳过 fetch（禁推守卫只警告、不触网）。
@@ -1114,7 +1114,7 @@ return {
           command: String(i + 1),
         }))
         const verifiedMarker = await readJsonAt(rootPath, '.baton/local/push-verified.json', null)
-        // pending 只允许真实远端 receipt 清除（Codex 0.1.39 终验 B4 修复）：
+        // pending 只允许真实远端 receipt 清除：
         // ① push_state === 'verified'（baton_verify_push + record_push 实查后的记账）；
         // ② 本工具 fetch 后实时 ls-remote 实查远端 tip == 本地 HEAD（本地「声明 SHA 是 HEAD 祖先」不算数——
         //    未 push 的本地提交不会出现在远端，本地祖先关系无法证明已发布）；
@@ -1220,7 +1220,7 @@ return {
         }
         // release 必须校验锁所有权——无条件删除他人 ref 破坏单写入者。
         // 持有者 = state.ownership.writer 或锁信息 writer；本会话持有或无人持有（可接手态）才允许释放。
-        // Codex 0.1.39 终验 B4 修复：锁 ref 存在且持有者非空时，无宿主 session 身份 → fail-closed 拒绝释放。
+        // 锁 ref 存在且持有者非空时，无宿主 session 身份 → fail-closed 拒绝释放。
         const wRel = currentSession()
         const myWriter = (wRel !== undefined && wRel !== null && wRel.id !== undefined) ? String(wRel.id) : null
         const lockInfo = await readJsonAt(rootPath, '.baton/local/ownership-lock.json', null)
@@ -1345,7 +1345,7 @@ return {
           baseSha = prevSnap.base_sha
           baseDeps = Array.isArray(prevSnap.base_deps) ? prevSnap.base_deps : null
         }
-        // D2（Codex 0.1.39 终验）：例外窗口绑定——lean_exceptions 只能在任务首次 select（预算窗口建立）时登记；
+        // 例外窗口绑定——lean_exceptions 只能在任务首次 select（预算窗口建立）时登记；
         // base 已锁定的重选只能收窄例外（删除条目），不得新增/放宽——执行者事后自填无效。
         if (baseSha !== null && leanExceptions.length > 0) {
           const prevExc = (prevSnap !== undefined && prevSnap !== null && prevSnap.lean && Array.isArray(prevSnap.lean.lean_exceptions)) ? prevSnap.lean.lean_exceptions : []
@@ -1418,7 +1418,7 @@ return {
         const wSessCo = currentSession()
         const coAgentId = (wSessCo !== undefined && wSessCo !== null && wSessCo.id !== undefined) ? String(wSessCo.id) : null
         const reviewerAgentId = reviewerAgentIdRaw
-        // A3（Codex 0.1.39 终验 A-REV 修复）：Reviewer 独立性 receipt——调用者字符串只能标 unverified；
+        // Reviewer 独立性 receipt——调用者字符串只能标 unverified；
         // 独立复核必须来自宿主签发事件（reviewer_run_id 的 subagent/descriptor），查无事件 → 如实标 unverified。
         let reviewerReceipt = null
         if (reviewerRunIdRaw !== '') {
@@ -1556,7 +1556,7 @@ return {
         let leanReport = null
         if (leanSnap !== null && (leanSnap.policy === 'strict' || leanSnap.policy === 'full')) {
           const delta = await leanDelta(rootPath, leanBaseSha, isBatonManaged)
-          // Codex 0.1.39 终验 D1 修复：strict 下任何 delta 计算错误一律阻断（fail-closed），不猜测放行
+          // strict 下任何 delta 计算错误一律阻断（fail-closed），不猜测放行
           if (leanSnap.policy === 'strict' && delta.errors.length > 0) {
             return {
               ok: false, aborted: true,
@@ -1615,7 +1615,7 @@ return {
         const sameDay = tokenBefore !== null && tokenBefore.date === today
         const phase1Retry = sameDay && tokenBefore.head_at_start === git.head && tokenBefore.commit1_head === undefined
         const phase2Retry = sameDay && tokenBefore.commit1_head !== undefined && git.head === tokenBefore.commit1_head
-        // B3（Codex 0.1.39 终验）：commit1 已成功但 token 未写 commit1_head（崩溃窗口）→ 识别为 commit1Already：
+        // 断点恢复：commit1 已成功但 token 未写 commit1_head（崩溃窗口）→ 识别为 commit1Already：
         // 跳过文档阶段与 commit1，直接进入发布记录阶段（重试不重复 metrics/提交）。
         let commit1Already = false
         if (sameDay && !phase1Retry && !phase2Retry && tokenBefore.head_at_start !== undefined && tokenBefore.head_at_start !== git.head) {
@@ -1713,7 +1713,7 @@ return {
             const commit = await sh('git commit -m "baton: 下班收尾 ' + today + '"', rootPath)
             committed = commit.exitCode === 0
             if (!committed && /nothing to commit/i.test(commit.out + commit.err)) {
-              // B3（Codex 0.1.39 终验）：commit1 已成功但 closeout token 未写入（崩溃窗口）→
+              // 断点恢复：commit1 已成功但 closeout token 未写入（崩溃窗口）→
               // HEAD 顶部已是本次收尾提交时视为 commit1 完成，继续发布记录阶段（否则漏掉 commit2/发布状态）。
               const headLog = await sh('git log -1 --format=%s', rootPath)
               const headNow = (await sh('git rev-parse HEAD', rootPath)).out.trim()
@@ -1817,7 +1817,7 @@ return {
         // —— accept 路径：用户已验收，把「待验收」最终置为「已完成」（此前状态机缺少这一步，任务永远无法真正完成）——
         if (action === 'accept') {
           if (found.status === 'completed') {
-            // B3（Codex 0.1.39 终验）：tasks 已置 completed 但完成条目验收标注未更新（崩溃窗口）→ 断点修复补齐
+            // 断点恢复：tasks 已置 completed 但完成条目验收标注未更新（崩溃窗口）→ 断点修复补齐
             const finRep2 = (await readTextAt(rootPath, 'docs/ai_memory/tasks/task_finished.md')) || ''
             const segRep2 = finRep2.split('## ').find((s) => s.indexOf(taskId + '｜') === 0 || s.indexOf(taskId + '|') === 0) || ''
             if (segRep2 !== '' && segRep2.indexOf('用户验收：已验收') === -1) {
@@ -1834,7 +1834,7 @@ return {
           if (found.status !== 'awaiting_acceptance') {
             return { ok: false, reason: '任务尚未 finish（当前状态：' + found.status + '）：先调用 baton_complete(action=finish) 置「待验收」，用户验收通过后再 accept' }
           }
-          // 门禁必须在 completed 之前成立（Codex 0.1.39 终验 A-COMP 修复）：
+          // 门禁必须在 completed 之前成立：
           // 无有效执行证据或证据行占位 → 拒绝 accept，保持 awaiting_acceptance，零 completed 写入。
           const a2Gate = await taskEvidenceGate(rootPath, taskId)
           if (!a2Gate.evOk) {
@@ -2257,7 +2257,7 @@ return {
           const stateSha = state !== null && state.repository !== undefined && state.repository !== null && state.repository.push_state === 'verified' ? String(state.repository.push_verified_sha) : ''
           const markerOk = markerSha !== '' && /^[0-9a-f]{40}$/i.test(markerSha) && (markerSha === git.head || await isAncestor(markerSha, git.head, rootPath))
           const stateOk = stateSha !== '' && /^[0-9a-f]{40}$/i.test(stateSha) && (stateSha === git.head || await isAncestor(stateSha, git.head, rootPath))
-          // 发布声明兑现（Codex 0.1.39 终验 B4 修复）：本地「声明 SHA 是 HEAD 祖先」不再视为已发布——
+          // 发布声明兑现：本地「声明 SHA 是 HEAD 祖先」不再视为已发布——
           // 只有实时 ls-remote 实查远端 tip == 本地 HEAD 才算真实远端 receipt。
           let liveDeclaredOk = false
           if (git.remotes.length > 0) {
@@ -2373,7 +2373,7 @@ return {
           if (s === '') continue
           try {
             const r = JSON.parse(s)
-            // A3（Codex 0.1.39 终验）：调用者字符串满足不了独立性——
+            // 调用者字符串满足不了独立性——
             // 独立复核成立 = 宿主签发 receipt（reviewer_receipt.verified && origin=host_descriptor）且复核身份与执行者分离；
             // 声明了 reviewer 但无 receipt（或同身份）→ 视为假 Reviewer。
             if (r && typeof r.actual_model === 'string' && typeof r.reviewer_model === 'string') {
@@ -2638,7 +2638,7 @@ return {
         // source SHA 绑定：证据必须绑定记录时刻的仓库 HEAD，accept 校验其为当前 HEAD 祖先
         let evHead = ''
         try { evHead = (await gitSnapshot(rootPath)).head } catch (e) { evHead = '' }
-        // B3（Codex 0.1.39 终验）：exactly-once effect key——多处 append 之间崩溃后重试不再重复追加；
+        // exactly-once effect key——多处 append 之间崩溃后重试不再重复追加；
         // 同一 ekey（任务|run|模型|来源）已存在于目标文件即跳过该次 append。
         const ekey = taskId + '|' + (runId || '-') + '|' + actualModel + '|' + source
         const ekeyIn = async (rel) => {

@@ -1,4 +1,4 @@
-<!-- baton-src: README.md sha256:be1cbcf4ed42 status:current -->
+<!-- baton-src: README.md sha256:71680646d0ac status:stale -->
 # 🥁 Baton — 交接你的專案，而不是你的上下文。
 
 <p align="center">

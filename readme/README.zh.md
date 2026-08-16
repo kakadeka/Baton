@@ -1,4 +1,4 @@
-<!-- baton-src: README.md sha256:be1cbcf4ed42 status:current -->
+<!-- baton-src: README.md sha256:71680646d0ac status:current -->
 # 🥁 Baton — 把你的项目传下去，而不是把你的上下文传下去。
 
 <p align="center">
@@ -89,7 +89,7 @@ dsh plugin --profile web add @kakadeka/dsh-baton
 | 16 | 想搬到新项目/分享给别人 | 框架与实例分离，`Baton init` 一键初始化；分享走敏感词扫描（命中即中止导出/发布，绝不外泄） |
 | 17 | 外部 Skill 绕过项目规矩 | 外部 Skill 可用但项目边界由 Baton 统一约束，与 AGENTS.md 协调 |
 
-## ✨ 功能全景（8 大能力块）
+## ✨ 功能全景
 
 | 能力块 | 包含什么 |
 |---|---|
@@ -101,6 +101,10 @@ dsh plugin --profile web add @kakadeka/dsh-baton
 | **自动模型路由** | 任务分级 × 模型规则表（flash/pro + high/max + fallback 链）→ 推荐/实际分开记录，透明可核。模型池默认**未验证**：真实验证后才标 verified；无 verified 模型时路由如实返回空并提示（绝不硬编码兜底）。**规则跨平台一致**：DSH 用 subagent 派发，Claude Code / Codex / Cursor 用各自内置子代理机制（详见 SKILL「平台能力」） |
 | **月度报表** | 模型排行 / 小时分布 / 按日明细 / 代理明细，数据来自真实执行记录 |
 | **一键验收** | DSH 用户：`baton_accept` 全检查 PASS/FAIL；无插件用户：按 `docs/ai_memory/` 清单逐项核对（骨架/状态/安全/体积） |
+| **Lean 精简门** | 任务级 `implementation_policy`（off/lite/full/strict）：strict 模式下新增依赖/文件/抽象有机械预算，超预算收尾会被阻断，直到用户确认例外才放行 |
+| **专项 Skills** | `lean-review`（过度工程审查）、`debt`（技术债扫描）、`doctor`（健康诊断：版本/漂移/锁/发布面）——全部只读，随主 skill 一起安装 |
+| **凭据卫生** | 所有持久化输入统一扫描，凭据绝不进 Git、记忆、报表或日志 |
+| **可信发布** | npm 每次发布带 SLSA provenance（OIDC 可信发布，tag 触发） |
 
 ## 🗣️ 口令详解（什么场景下用）
 
@@ -121,6 +125,7 @@ dsh plugin --profile web add @kakadeka/dsh-baton
 | **拉取github / 同步github / 看看git状态** | *pull github / sync github / check git status* | 想手动操作 Git 时 | 走轻量 Git 路径，不建契约不启动审查 |
 | **检查更新** | *check update* | 想知道 Baton 有没有新版 | 读本机版本锚 + 实查 GitHub/npm 最新版，报告「已是最新 / 有新版」 |
 | **更新 Baton** | *update baton* | 有新版想升级 | AI 全流程更新（git pull + 重跑安装脚本 / npm update）并核验版本一致 |
+| **精简审查 / 技术债盘点 / 健康诊断** | *lean review / scan debt / run doctor* | 想要代码审计 / 债单 / 体检 | 运行对应只读专项 Skill（过度工程审查 / BATON-DEBT 扫描 / 版本-漂移-锁诊断） |
 
 ## 🛠️ 其他 AI 工具安装（Codex / Claude / Cursor）
 
@@ -214,6 +219,17 @@ pwsh -File $HOME\Baton\scripts\baton-install.ps1 -Scope Project
 | **更新 Baton** | *update baton* | 有新版时 AI 全流程更新（git pull + 重跑安装脚本 / npm update），并核验本地版本与远端一致才算完成 |
 
 贴心提示：每天「上班啦」时，如果超过 7 天没检查过更新，Baton 会顺带提醒一句「可检查更新」。新版 SKILL 在**新会话**生效；DSH 组合包更新后需重启。
+
+### 第 6 步：安全卸载（只清自己，绝不碰你的内容）
+
+```powershell
+pwsh -File $HOME\Baton\scripts\baton-uninstall.ps1 -ProjectRoot C:\你的项目路径
+```
+
+- 只删除安装器创建的东西：三端 skill 镜像、入口文件里的 Baton 段（只删标记范围）、版本锚。
+- 默认保留你的记忆（`docs/ai_memory/`）与配置——那是你的项目真相；加 `-RemoveMemory` 才是真的全删。
+- 安装后被你改过的文件按内容 hash 检测，会**保留并提示**，绝不静默删除。
+- `-DryRun` 先演练，不写任何文件。
 
 ### 一键脚本做了什么（透明可查）
 

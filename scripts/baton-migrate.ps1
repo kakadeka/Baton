@@ -250,7 +250,7 @@ if ($DryRun) { Step "  (DryRun) 将替换入口引用：$($replaced -join ', ')"
 
 # ---------- ⑤ 现行同名文档中的旧名称替换（保护历史记录） ----------
 # 只处理"现行规则载体"：current.md / validation_matrix.md / development_workflow.md / handoff_current.md 的现行部分。
-# 保护规则：跳过历史载体行——交接条目标题（### HO-）、版本史（Workday V8）、修订记录行（| 2026- 开头）、机器状态（分支名/投影块）。
+# 保护规则：跳过历史载体行——交接条目标题（### HO-）、版本史、修订记录行（| YYYY- 开头）、机器状态（分支名/投影块）。
 Step "⑤ 现行同名文档中的旧名称替换（历史记录与机器状态除外）"
 $liveDocs = @('docs\ai_memory\current.md', 'docs\ai_memory\validation_matrix.md', 'docs\ai_memory\development_workflow.md', 'docs\ai_memory\handoff_current.md', 'docs\ai_memory\tasks\task_schema.md')
 foreach ($ld in $liveDocs) {

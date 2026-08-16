@@ -181,7 +181,7 @@ if (-not (Test-Path $configTarget)) {
     $created += '.baton/config.json'
   } else { Step "将生成 .baton/config.json" }
 } else {
-  # 通用递归 schema merge（Codex C3）：config 已存在时按模板递归补齐缺失键——
+  # 通用递归 schema merge：config 已存在时按模板递归补齐缺失键——
   # 用户字段一律保留不覆盖；JSON 损坏 = 硬失败，绝不以成功安装收尾。
   $cfgRaw = Get-Content $configTarget -Raw -Encoding UTF8
   $cfgObj = $null
@@ -355,7 +355,7 @@ if ($DryRun) { Step "将生成 .baton/version.json（版本锚）" } else {
   $created += '.baton/version.json（版本锚 v' + $verInfo.version + '）'
 }
 
-# 7.5) 安装 manifest（Codex C2）：记录本脚本管理的文件与其内容 hash——
+# 7.5) 安装 manifest：记录本脚本管理的文件与其内容 hash——
 # 卸载只删 hash 未变的 managed 文件；用户修改过的文件保留并报告，绝不误删。
 $manifestTarget = Join-Path $ProjectRoot '.baton\manifest.json'
 if ($DryRun) { Step "将生成 .baton/manifest.json（managed 文件 hash 清单）" } else {

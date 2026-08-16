@@ -1,4 +1,4 @@
-<!-- baton-src: README.md sha256:be1cbcf4ed42 status:current -->
+<!-- baton-src: README.md sha256:71680646d0ac status:stale -->
 # 🥁 Baton — Passe o projeto adiante, não o seu contexto.
 
 <p align="center">
