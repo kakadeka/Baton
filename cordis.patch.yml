@@ -1,0 +1,4 @@
+# Baton 组合层：把插件行插入 profile 组合（id 唯一；name 指向本包插件入口）
+- insert:
+    - id: baton
+      name: '@kakadeka/dsh-baton'

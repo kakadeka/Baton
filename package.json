@@ -1,0 +1,79 @@
+{
+  "name": "@kakadeka/dsh-baton",
+  "version": "0.1.46",
+  "description": "Baton 项目接力协作系统 —— DeepSeek Harness 组合包（19 个 baton_* 工具）",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kakadeka/Baton.git"
+  },
+  "main": "index.mjs",
+  "files": [
+    "index.mjs",
+    "cordis.patch.yml",
+    "gittop.png",
+    "skills",
+    "readme",
+    "scripts/baton-install.ps1",
+    "scripts/baton-migrate.ps1",
+    "scripts/baton-sync.ps1",
+    "scripts/baton-uninstall.ps1",
+    "templates",
+    "plugin"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-code-runtime": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-user-approval": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-scope": "^0.1.0-rc.6"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-code-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-invariants": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-approval": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-scope": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "node tests/p0-closeout.test.js && node tests/p1-behavior.test.js && node tests/p2-e2e.test.js && node tests/p3-sync.test.js && node tests/p4-crossmachine.test.js && node tests/p5-posix.test.js && node tests/p6-concurrency.test.js && node tests/p7-crash.test.js && node scripts/check-drift.mjs"
+  }
+}

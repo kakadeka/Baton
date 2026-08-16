@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "project_name": "PROJECT_NAME",
+  "remotes": {
+    "origin": "REPLACE_WITH_REMOTE_URL",
+    "push_allowed": ["origin"],
+    "push_blocked": []
+  },
+  "branch": {
+    "base": "master"
+  },
+  "protected_paths": [".github", ".env"],
+  "verify": {
+    "remote_sha": true,
+    "ff_only": true
+  },
+  "model_pool": [
+    { "id": "deepseek-v4-flash", "provider": "deepseek", "tags": ["fast", "cheap"], "status": "unverified" },
+    { "id": "deepseek-v4-pro", "provider": "deepseek", "tags": ["reasoning", "review"], "status": "unverified" }
+  ],
+  "routing": [
+    { "task": "micro", "mode": "main-session" },
+    { "task": "bounded", "prefer": ["fast"], "fallback": ["reasoning"], "reasoning": "high" },
+    { "task": "complex", "prefer": ["reasoning"], "fallback": ["fast"], "reasoning": "high" },
+    { "task": "architecture", "prefer": ["reasoning"], "fallback": [], "reasoning": "high" },
+    { "task": "high_risk", "prefer": ["reasoning"], "fallback": [], "reasoning": "high" },
+    { "task": "review", "prefer": ["reasoning"], "fallback": ["fast"], "reasoning": "high" }
+  ],
+  "legacy": {
+    "doc_roles": null
+  },
+  "update": {
+    "check_interval_days": 7,
+    "channels": ["github", "npm"]
+  }
+}

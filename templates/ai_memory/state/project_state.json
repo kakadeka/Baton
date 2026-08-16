@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "updated_at": "INIT_TIME",
+  "repository": {
+    "id": null,
+    "branch": null,
+    "dirty": false,
+    "remote_sha": null,
+    "last_published_sha": null
+  },
+  "current_task_id": null,
+  "active_work": null,
+  "ownership": {
+    "writer": null,
+    "logical_state": "released",
+    "updated_at": "INIT_TIME"
+  },
+  "last_handoff": null
+}

@@ -1,0 +1,29 @@
+name: publish
+
+# 可信发布：仅从不可变 tag 触发，OIDC trusted publishing——
+# 不保存长期 npm token（npm CLI ≥9.5 在 Actions 内自动做 OIDC 交换）。
+# npm 侧一次性启用：npmjs.com 包设置 → Access → 把本仓库添加为 trusted publisher（owner/repo/workflow=publish）。
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish-npm:
+    if: github.repository == 'kakadeka/Baton'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org/'
+      - name: Upgrade npm (scoped-package OIDC publish requires recent npm)
+        run: npm install -g npm@latest
+      - name: Drift check
+        run: node scripts/check-drift.mjs
+      - name: Publish to npm (OIDC provenance)
+        run: npm publish --provenance --access public
