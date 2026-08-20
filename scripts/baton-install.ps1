@@ -18,7 +18,7 @@
 #   2) .baton/config.json 项目配置
 #   3) .gitignore 追加 .baton/ 忽略
 #   4) 三端 skill 镜像（.agents/.claude/.cursor/skills/baton/）
-#   5) 三端入口段（AGENTS.md / CLAUDE.md / .cursorrules）
+#   5) 三端入口段（AGENTS.md / CLAUDE.md / .cursorrules）+ Cursor 规则 .cursor/rules/baton.mdc
 #   6) 检测旧 skill（workday/EboWork）给出迁移建议
 # ------------------------------------------------------------------
 param(
@@ -306,6 +306,25 @@ foreach ($e in $entries) {
   }
 }
 
+# 5b) Cursor 现代规则（整文件模板；frontmatter 不能套 HTML marker）
+$mdcSrc = Join-Path $RepoRoot 'templates\adapter\CURSOR.rules.mdc'
+$mdcDest = Join-Path $ProjectRoot '.cursor\rules\baton.mdc'
+if (Test-Path $mdcSrc) {
+  $mdcSeg = Get-Content $mdcSrc -Raw -Encoding UTF8
+  if ($DryRun) { Step "将写入 .cursor/rules/baton.mdc" }
+  else {
+    $mdcExisting = if (Test-Path $mdcDest) { Get-Content $mdcDest -Raw -Encoding UTF8 } else { '' }
+    $mdcNorm = { param($s) ($s -replace "`r`n", "`n") }
+    if ($mdcExisting -ne '' -and $mdcExisting -notmatch 'Baton 项目协作入口') {
+      $created += '.cursor/rules/baton.mdc（⚠ 已有非 Baton 内容，跳过）'
+    } elseif ((& $mdcNorm $mdcExisting) -ne (& $mdcNorm $mdcSeg)) {
+      New-Item -ItemType Directory -Force (Split-Path $mdcDest -Parent) | Out-Null
+      [System.IO.File]::WriteAllText($mdcDest, ((& $mdcNorm $mdcSeg).TrimEnd() + "`n"), (New-Object System.Text.UTF8Encoding $false))
+      $created += '.cursor/rules/baton.mdc'
+    }
+  }
+}
+
 # 6) 旧 skill 检测（workday / ebowork 系列，含拆分后的 ebowork-*；只提示不删除）
 foreach ($tool in @('.agents', '.claude', '.cursor')) {
   $skillsDir = Join-Path $ProjectRoot ($tool + '\skills')
@@ -359,7 +378,7 @@ if ($DryRun) { Step "将生成 .baton/version.json（版本锚）" } else {
 # 卸载只删 hash 未变的 managed 文件；用户修改过的文件保留并报告，绝不误删。
 $manifestTarget = Join-Path $ProjectRoot '.baton\manifest.json'
 if ($DryRun) { Step "将生成 .baton/manifest.json（managed 文件 hash 清单）" } else {
-  $manifestRel = @('.baton/version.json')
+  $manifestRel = @('.baton/version.json', '.cursor/rules/baton.mdc')
   foreach ($tool in @('.agents', '.claude', '.cursor')) {
     foreach ($s in @('baton', 'baton-lean-review', 'baton-debt', 'baton-doctor')) {
       $manifestRel += ($tool + '/skills/' + $s + '/SKILL.md')

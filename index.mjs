@@ -10,6 +10,9 @@ const BATON_PKG_DIR = fileURLToPath(new URL(".", import.meta.url))
 export function apply(ctx) {
     let shell = ctx.get('shell')
     let fs = ctx.get('fs')
+    // verify_push → record_push 的进程内短期回执：绑定项目/分支/本地 HEAD/远端 SHA。
+    // 不写磁盘，因此 verify_push 仍保持文件系统纯只读；宿主重启后自动回落为重新实查远端。
+    const verifiedPushReceipts = new Map()
     function services() {
       if (shell === undefined) shell = ctx.get('shell')
       if (fs === undefined) fs = ctx.get('fs')
@@ -24,6 +27,34 @@ export function apply(ctx) {
         return a === undefined ? undefined : a.session
       } catch (e) {
         return undefined
+      }
+    }
+
+    function currentAgent() {
+      try {
+        const agents = ctx.get('agents')
+        return agents === undefined ? undefined : agents.currentInitiator()
+      } catch (e) {
+        return undefined
+      }
+    }
+
+    async function approvalOnce(toolName, reason, exec) {
+      let approval
+      try { approval = ctx.approval !== undefined ? ctx.approval : ctx.get('approval') } catch (e) { approval = undefined }
+      const initiatingAgent = currentAgent()
+      const agent = exec && exec.agent
+      const callId = exec && exec.callId
+      if (approval === undefined || typeof approval.request !== 'function' || agent === undefined || typeof callId !== 'string' || callId === '' || (initiatingAgent !== undefined && initiatingAgent !== agent)) {
+        return { allowed: false, outcome: 'unavailable', reason: 'DSH approval 服务、exec.agent/callId 或当前开放轮次绑定不可用：fail-closed；Codex/Claude/Cursor 只能按无插件流程由主会话当轮确认，不能伪装成宿主机械授权' }
+      }
+      try {
+        const outcome = await approval.request({ agent, toolName, callId, reason, signal: exec.signal })
+        return outcome === 'allowed-once'
+          ? { allowed: true, outcome }
+          : { allowed: false, outcome, reason: '宿主一次性授权结果为 ' + outcome + '：拒绝扩大范围' }
+      } catch (e) {
+        return { allowed: false, outcome: 'unavailable', reason: '宿主授权请求失败：已按 fail-closed 拒绝扩大范围' }
       }
     }
 
@@ -107,6 +138,88 @@ export function apply(ctx) {
       await writeTextRetry(rootPath, rel, cur + content)
     }
 
+    function stableMetricId(prefix, value) {
+      const s = String(value)
+      let a = 2166136261
+      let b = 2246822519
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i)
+        a ^= c
+        a = Math.imul(a, 16777619)
+        b ^= c + i
+        b = Math.imul(b, 3266489917)
+      }
+      const hex = (n) => (n >>> 0).toString(16).padStart(8, '0')
+      return prefix + '-' + hex(a) + hex(b)
+    }
+
+    function jsonlObjects(raw) {
+      return String(raw || '').split('\n').map((line) => {
+        try { return JSON.parse(line) } catch (e) { return null }
+      }).filter((row) => row !== null && typeof row === 'object')
+    }
+
+    function metricComparable(row) {
+      const out = {}
+      for (const k of Object.keys(row || {}).sort()) {
+        if (k !== 'ts' && k !== 'started_at' && k !== 'ended_at') out[k] = row[k]
+      }
+      return JSON.stringify(out)
+    }
+
+    async function metricEventRows(rootPath, days) {
+      services()
+      const rels = []
+      const now = Date.now()
+      const monthKeys = new Set()
+      const spanDays = Math.max(31, Number(days || 30))
+      for (let offset = 0; offset <= spanDays; offset++) {
+        const d = east8Stamp(now - offset * 86400000).date
+        monthKeys.add(d.slice(0, 7).replace('-', '/'))
+      }
+      for (const month of monthKeys) rels.push('docs/ai_memory/agent_metrics/' + month + '/runs.jsonl')
+      try {
+        const dir = await fs.resolve('.baton/local/metrics', { cwd: rootPath })
+        const entries = await fs.listDir(dir)
+        for (const e of entries || []) {
+          if (e.type === 'file' && /\.jsonl$/i.test(e.name || '')) rels.push('.baton/local/metrics/' + e.name)
+        }
+      } catch (e) { /* 尚无本机 metrics */ }
+      const rows = []
+      const seen = new Set()
+      for (const rel of rels) {
+        const raw = (await readTextAt(rootPath, rel)) || ''
+        for (const row of jsonlObjects(raw)) {
+          const key = typeof row.event_id === 'string' && row.event_id !== '' ? 'event:' + row.event_id : 'raw:' + JSON.stringify(row)
+          if (seen.has(key)) continue
+          seen.add(key)
+          rows.push(row)
+        }
+      }
+      return rows
+    }
+
+    async function appendMetricEventOnce(rootPath, event) {
+      const rows = await metricEventRows(rootPath, 31)
+      const existing = rows.find((r) => r.event_id === event.event_id)
+      if (existing !== undefined) {
+        if (metricComparable(existing) !== metricComparable(event)) return { ok: false, conflict: true, existing }
+        return { ok: true, existing, appended: false }
+      }
+      const day = east8Stamp(event.ts).date
+      await appendTextAt(rootPath, '.baton/local/metrics/' + day + '.jsonl', JSON.stringify(event) + '\n')
+      return { ok: true, existing: event, appended: true }
+    }
+
+    function parseNullableCount(value, field) {
+      const s = value === undefined || value === null ? '' : String(value).trim()
+      if (s === '') return { ok: true, value: null }
+      if (!/^\d+$/.test(s)) return { ok: false, reason: field + ' 必须是非负整数或留空' }
+      const n = Number(s)
+      if (!Number.isSafeInteger(n)) return { ok: false, reason: field + ' 超出安全整数范围' }
+      return { ok: true, value: n }
+    }
+
     async function readJsonAt(rootPath, rel, fallback) {
       const raw = await readTextAt(rootPath, rel)
       if (raw === null) return fallback
@@ -146,11 +259,48 @@ export function apply(ctx) {
       await writeTextAt(rootPath, 'docs/ai_memory/state/archive_index.json', JSON.stringify(index, null, 2))
     }
 
+    function east8Stamp(input) {
+      const base = input === undefined || input === null ? Date.now() : (input instanceof Date ? input.getTime() : new Date(input).getTime())
+      const x = new Date(base + 8 * 60 * 60 * 1000)
+      const p = (n) => String(n).padStart(2, '0')
+      const date = x.getUTCFullYear() + '-' + p(x.getUTCMonth() + 1) + '-' + p(x.getUTCDate())
+      const hm = p(x.getUTCHours()) + ':' + p(x.getUTCMinutes())
+      const hhmm = p(x.getUTCHours()) + p(x.getUTCMinutes())
+      return { date, hm, hhmm, display: date + ' ' + hm }
+    }
+    function agentLabel(args) {
+      const s = [
+        args && args.writer_agent,
+        args && args.actual_model,
+        process.env.CURSOR_TRACE_ID ? 'cursor' : '',
+        process.env.CLAUDECODE ? 'claude' : '',
+      ].join(' ').toLowerCase()
+      if (s.indexOf('workbuddy') !== -1) return 'workbuddy'
+      if (s.indexOf('cursor') !== -1) return 'Cursor'
+      if (s.indexOf('codex') !== -1) return 'Codex'
+      if (s.indexOf('claude') !== -1) return 'Claude'
+      if (s.indexOf('deepseek') !== -1 || /\bdsh\b/.test(s)) return 'DeepSeek'
+      return '未知'
+    }
+    function topicOf(text, fallback) {
+      const t = String(text || '').replace(/\s+/g, ' ').trim()
+      if (t === '') return fallback
+      return t.length > 24 ? t.slice(0, 24) : t
+    }
+    function hoId(agent, when) {
+      const e = east8Stamp(when)
+      return 'HO-' + e.date.replace(/-/g, '') + '-' + e.hhmm + '-' + (agent || '未知')
+    }
+    function safeRevCell(s) {
+      return String(s || '').replace(/\|/g, '/').replace(/\r?\n/g, ' ')
+    }
+
     // 修订记录表（每个长期 md 的强制区块）：若文件已有该表则追加一行，否则插入一个最小表。
     // 行尾必须兼容 CRLF：Windows 检出的模板是 CRLF，只匹配 LF 的正则会静默追加失败。
-    async function appendRevision(rootPath, rel, summary) {
+    async function appendRevision(rootPath, rel, summary, agent) {
+      const who = agent || '未知'
       const cur = (await readTextAt(rootPath, rel)) || ''
-      const row = '| ' + todayLocal() + ' | Baton | ' + summary + ' |\n'
+      const row = '| ' + todayLocal() + ' | ' + who + ' | ' + safeRevCell(summary) + ' |\n'
       const header = '| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n'
       const marker = '| 日期 | 修改人 | 变更概要 |'
       const idx = cur.indexOf(marker)
@@ -159,7 +309,6 @@ export function apply(ctx) {
         if (re.test(cur)) {
           await writeTextRetry(rootPath, rel, cur.replace(re, '$1' + row))
         } else {
-          // 表头在但行尾异常：在表头行结束处插入，绝不动其他内容
           const lineEnd = cur.indexOf('\n', idx)
           const at = lineEnd === -1 ? cur.length : lineEnd + 1
           await writeTextRetry(rootPath, rel, cur.slice(0, at) + row + cur.slice(at))
@@ -167,6 +316,40 @@ export function apply(ctx) {
       } else {
         await writeTextRetry(rootPath, rel, cur + '\n## 【修订记录】\n\n' + header + row + '\n')
       }
+    }
+
+    async function upsertCurrentRevision(rootPath, rel, summary, agent) {
+      const who = agent || '未知'
+      const day = todayLocal()
+      const newRow = '| ' + day + ' | ' + who + ' | ' + safeRevCell(summary) + ' |'
+      const cur = (await readTextAt(rootPath, rel)) || ''
+      const lines = cur.split('\n')
+      const start = lines.findIndex((l) => l.indexOf('| 日期 | 修改人 | 变更概要 |') !== -1)
+      const reRow = /^\| (\d{4}-\d{2}-\d{2}) \|/
+      if (start === -1) {
+        await appendRevision(rootPath, rel, summary, agent)
+        return
+      }
+      let i = start + 2
+      const rows = []
+      while (i < lines.length) {
+        const line = lines[i]
+        if (!reRow.test(line)) break
+        rows.push({ date: line.match(reRow)[1], line })
+        i += 1
+      }
+      if (rows.length > 0 && rows[0].date === day) rows[0].line = newRow
+      else rows.unshift({ date: day, line: newRow })
+      const seen = {}
+      const kept = []
+      for (const r of rows) {
+        if (seen[r.date]) continue
+        seen[r.date] = true
+        kept.push(r)
+        if (kept.length === 3) break
+      }
+      const out = lines.slice(0, start + 2).concat(kept.map((r) => r.line)).concat(lines.slice(i))
+      await writeTextRetry(rootPath, rel, out.join('\n'))
     }
 
     // 日报：不存在时用模板头创建，再追加条目。
@@ -181,25 +364,22 @@ export function apply(ctx) {
     }
 
     // 保头更新 current.md：保留【归档分卷索引】+【修订记录】区块，只替换「当前事实」主体。
-    async function updateCurrentFacts(rootPath, factsText) {
+    async function updateCurrentFacts(rootPath, factsText, revSummary, agent) {
       const rel = await docRole(rootPath, 'current')
       const cur = (await readTextAt(rootPath, rel)) || ''
-      // 幂等：目标主体已相同 → 不写，避免重试追加重复修订行
       const idx = cur.indexOf('## 当前事实')
       if (idx !== -1 && cur.slice(idx).trim() === ('## 当前事实（简写，随生命周期更新）\n\n' + factsText).trim()) return
-      await appendRevision(rootPath, rel, '更新当前工作摘要')
+      await upsertCurrentRevision(rootPath, rel, revSummary || topicOf(factsText, '更新当前事实'), agent)
       const updated = await readTextAt(rootPath, rel) || cur
-      // 从「当前事实」小节标题开始截断，替换为新的主体；找不到标题则整体重建。
       const idx2 = updated.indexOf('## 当前事实')
       const head = idx2 === -1 ? updated : updated.slice(0, idx2)
       const body = head.replace(/\n+$/, '') + '\n\n## 当前事实（简写，随生命周期更新）\n\n' + factsText + '\n'
       await writeTextAt(rootPath, rel, body)
     }
 
-    // 追加交接条目：同时更新【修订记录】。
-    async function appendHandoffEntry(rootPath, entryMarkdown, revSummary) {
+    async function appendHandoffEntry(rootPath, entryMarkdown, revSummary, agent) {
       const rel = await docRole(rootPath, 'handoff')
-      await appendRevision(rootPath, rel, revSummary)
+      await appendRevision(rootPath, rel, revSummary, agent)
       await appendTextAt(rootPath, rel, '\n' + entryMarkdown + '\n')
     }
 
@@ -239,16 +419,22 @@ export function apply(ctx) {
       return new Date().toISOString()
     }
 
+    function issuePushReceipt(rootPath, branch, localHead, remoteSha, evidence) {
+      const now = Date.now()
+      for (const [key, value] of verifiedPushReceipts.entries()) {
+        if (value === null || now - value.issued_at_ms > 10 * 60 * 1000) verifiedPushReceipts.delete(key)
+      }
+      const token = 'push-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 14)
+      verifiedPushReceipts.set(token, { root_path: rootPath, branch, local_head: localHead, remote_sha: remoteSha, evidence, issued_at_ms: now })
+      return token
+    }
+
     function todayLocal() {
-      const d = new Date()
-      const p = (n) => String(n).padStart(2, '0')
-      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      return east8Stamp().date
     }
 
     function monthLocal() {
-      const d = new Date()
-      const p = (n) => String(n).padStart(2, '0')
-      return d.getFullYear() + '/' + p(d.getMonth() + 1)
+      return todayLocal().slice(0, 7).replace('-', '/')
     }
 
     function safeBranchName(b) {
@@ -394,6 +580,43 @@ export function apply(ctx) {
         if (String(own.writer) !== String(w.id)) return { pass: false, reason: '单写入者锁由 ' + String(own.writer).slice(0, 20) + ' 持有（非本会话）：写操作被拒绝；换会话先「上班啦」或经用户确认 baton_release 释放' }
       }
       return { pass: true, reason: null }
+    }
+
+    // ownership ref 是原子锁权威。释放必须先读取旧 SHA，再用 update-ref CAS 删除并回读确认；
+    // 非零结果不能当作“可能已经不存在”弱放行，否则会产生 state=released 但 ref 遗留。
+    async function releaseOwnershipRef(rootPath) {
+      const lockRef = 'refs/baton/ownership-lock'
+      const before = await sh('git rev-parse --verify --quiet ' + lockRef, rootPath)
+      if (before.exitCode === 1) return { ok: true, already_absent: true }
+      const oldSha = before.out.trim()
+      if (before.exitCode !== 0 || !/^[0-9a-f]{40}$/i.test(oldSha)) {
+        return { ok: false, reason: '无法读取 ownership ref：' + (before.timedOut ? 'timeout' : (before.err || 'exit=' + before.exitCode)) }
+      }
+      const del = await sh('git update-ref -d ' + lockRef + ' ' + oldSha, rootPath)
+      if (del.exitCode !== 0) {
+        return { ok: false, reason: 'ownership ref 删除失败：' + (del.timedOut ? 'timeout' : (del.err || 'exit=' + del.exitCode)) }
+      }
+      const after = await sh('git rev-parse --verify --quiet ' + lockRef, rootPath)
+      if (after.exitCode !== 1) {
+        return { ok: false, reason: 'ownership ref 删除后仍存在或无法确认不存在' }
+      }
+      return { ok: true, already_absent: false }
+    }
+
+    async function tombstoneOwnershipLock(rootPath) {
+      const rel = '.baton/local/ownership-lock.json'
+      const existing = await readJsonAt(rootPath, rel, null)
+      if (existing !== null && existing.writer === null && existing.logical_state === 'released') return
+      await writeTextAt(rootPath, rel, JSON.stringify({ writer: null, logical_state: 'released', released_at: nowIso() }, null, 2))
+    }
+
+    async function verifiedGitHead(rootPath) {
+      const result = await sh('git rev-parse HEAD', rootPath)
+      const head = result.out.trim()
+      if (result.exitCode !== 0 || result.timedOut || !/^[0-9a-f]{40}$/i.test(head)) {
+        return { ok: false, head: null, reason: result.timedOut ? 'timeout' : (result.err || 'exit=' + result.exitCode) }
+      }
+      return { ok: true, head, reason: null }
     }
 
     // exactly-once 操作信封：
@@ -722,7 +945,7 @@ export function apply(ctx) {
             writer: ownership.writer || null,
             logical_state: ownership.logical_state || 'unknown',
           },
-          open_tasks: open.slice(0, 10).map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step })),
+          open_tasks: open.slice(0, 10).map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step || null })),
           current_summary: currentFacts(current),
           handoff_tail: handoffTail.slice(0, 1200),
           doc_roles_resolved: {
@@ -743,7 +966,7 @@ export function apply(ctx) {
       description: 'Baton：本地 Git 操作（status/commit_all）。commit_all 与下班同款门禁：protected 命中或非管理域改动未声明 allowed_files 即阻断。fetch/sync/push 属网络操作，请主会话用 pwsh 工具执行，再用 baton_verify_push 核验。危险操作（force push/reset/clean/rebase）不存在。',
       parameters: simple({ path: '项目根目录', action: 'status | commit_all', message: 'commit 信息（commit_all 时必填）', allowed_files: '允许改动的文件清单，逗号分隔（commit_all 存在非管理域改动时必填）' }),
       output: output(),
-      async execute(args) {
+      async execute(args, exec) {
         const rootPath = await rootOf(args)
         const action = args.action || 'status'
         if (action === 'status') {
@@ -759,7 +982,7 @@ export function apply(ctx) {
           const config = cfgG.config
           const protectedPaths = (config && Array.isArray(config.protected_paths)) ? config.protected_paths : []
           const isProtected = (f) => protectedPaths.some((p) => f === p || f.indexOf(p + '/') === 0 || f.indexOf(p + '\\') === 0)
-          const managed = (f) => f.indexOf('docs/ai_memory/') === 0 || f === '.baton' || f.indexOf('.baton/') === 0 || f === '.gitignore' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f)
+          const managed = (f) => f.indexOf('docs/ai_memory/') === 0 || f === '.baton' || f.indexOf('.baton/') === 0 || f === '.gitignore' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || f === '.cursor/rules/baton.mdc' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f)
           const allowed = (args.allowed_files || '').split(',').map((s) => s.trim()).filter((s) => s !== '')
           // Contract 预锁同款：预锁范围外的改动必须 user: 豁免，封死 commit_all 绕过 closeout 门禁
           const tasksDoc = await readJsonAt(rootPath, 'docs/ai_memory/state/tasks.json', { tasks: [] })
@@ -792,7 +1015,7 @@ export function apply(ctx) {
               next_step: '与用户确认越界改动后，在 allowed_files 中以 user:<路径> 声明用户豁免（禁止执行者自行加 user: 前缀）后重试',
             }
           }
-          const isBoundary = (f) => f === '.baton/config.json' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || f === '.gitignore' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f)
+          const isBoundary = (f) => f === '.baton/config.json' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || f === '.cursor/rules/baton.mdc' || f === '.gitignore' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f)
           const boundaryViolations = git.files_all.filter((f) => isBoundary(f) && !userExempt.some((a) => inPath(f, a)))
           if (boundaryViolations.length > 0) {
             return {
@@ -811,6 +1034,12 @@ export function apply(ctx) {
               secret_hits: stagedHits,
               next_step: '移除或移出本次提交范围后重试；确认安全需在 allowed_files 中以 user:<路径> 声明用户豁免',
             }
+          }
+          const exemptSecretHits = secretHits(userExempt.join('\n'))
+          if (exemptSecretHits.length > 0) return { ok: false, action, reason: 'user: 路径疑似含敏感信息：拒绝发送授权请求', secret_hits: exemptSecretHits }
+          if (userExempt.length > 0) {
+            const grant = await approvalOnce('baton_git.commit_all', 'Baton 提交范围一次性豁免：' + userExempt.join(', '), exec)
+            if (!grant.allowed) return { ok: false, action, reason: grant.reason, approval_outcome: grant.outcome, contract_violations: userExempt }
           }
           const msg = (args.message || 'baton: 自动提交 ' + todayLocal()).trim().replace(/[$`;&|<>]/g, ' ')
           const add = await sh('git add -A', rootPath)
@@ -857,6 +1086,7 @@ export function apply(ctx) {
               },
               message: synced ? '下班完成：真实远端 SHA == 本地 HEAD 且工作区干净（本工具自行 ls-remote 核验）' : (real !== git.head ? '下班未完成：真实远端 SHA 与本地不一致' : '下班未完成：工作区有未提交改动'),
               local_head: git.head, remote_sha: real,
+              verification_receipt: synced ? issuePushReceipt(rootPath, git.branch, git.head, real, 'ls-remote') : null,
             }
           }
           // 通道 2：gh api 实查（GitHub 远端；ls-remote 受限时仍能取到真实 SHA）
@@ -873,6 +1103,7 @@ export function apply(ctx) {
               },
               message: syncedG ? '下班完成：真实远端 SHA == 本地 HEAD 且工作区干净（本工具自行 gh api 实查）' : (ghSha !== git.head ? '下班未完成：真实远端 SHA 与本地不一致（gh api）' : '下班未完成：工作区有未提交改动'),
               local_head: git.head, remote_sha: ghSha,
+              verification_receipt: syncedG ? issuePushReceipt(rootPath, git.branch, git.head, ghSha, 'gh-api') : null,
             }
           }
           // 两通道均不可用：有远端但无工具自取证据 → 拒绝
@@ -911,8 +1142,8 @@ export function apply(ctx) {
 
     ctx.tools.register(defineTool({
       name: 'baton_record_push',
-      description: 'Baton：远端发布记账：verify_push 核验通过后调用，把真实远端 SHA 写入本机验收凭证 .baton/local/push-verified.json（gitignore）并同步进 Git 内 project_state.json（push_state=verified，跨电脑 clone 后 clock_in/accept 直接可用；该状态写入待下次收尾入库）。有远端时 ls-remote / gh api 实查并要求远端==本地 HEAD==传入 SHA，任一不符或两通道均不可用即拒绝（无实查证据不记账，凭证标 strong 供 accept 强核验）；无远端本地仓库时要求 SHA==本地 HEAD（本地语义）。',
-      parameters: simple({ path: '项目根目录', remote_sha: 'verify_push 核验通过的远端 SHA（必填）', source: 'SHA 来源：ls-remote | gh-api | local（可选；自查受限时必填 ls-remote/gh-api）' }),
+      description: 'Baton：远端发布记账：verify_push 核验通过后调用，把真实远端 SHA 写入本机验收凭证 .baton/local/push-verified.json（gitignore）。同进程时自动复用 verify_push 签发且绑定项目/分支/HEAD/SHA 的短期回执，避免重复远端查询；回执缺失、过期或不匹配时仍用 ls-remote / gh api 重新实查，绝不降级为声明式记账。无远端本地仓库时要求 SHA==本地 HEAD（本地语义）。',
+      parameters: simple({ path: '项目根目录', remote_sha: 'verify_push 核验通过的远端 SHA（必填）', source: 'SHA 来源：ls-remote | gh-api | local（可选）', verification_receipt: 'verify_push 返回的短期核验回执；仅供宿主自动传递，用户无需填写' }),
       output: output(),
       async execute(args) {
         const rootPath = await rootOf(args)
@@ -922,11 +1153,21 @@ export function apply(ctx) {
         const git = await gitSnapshot(rootPath)
         if (!safeBranchName(git.branch)) return { ok: false, reason: '分支名含非法字符，拒绝记账（防命令注入）' }
         if (git.dirty) return { ok: false, reason: '工作区有未提交改动，拒绝记账（先收尾入库）' }
+        const existingMarker = await readJsonAt(rootPath, '.baton/local/push-verified.json', null)
+        if (existingMarker !== null && existingMarker !== undefined && existingMarker.strong === true && existingMarker.real_check === true && existingMarker.remote_sha === remoteSha && existingMarker.local_head === git.head && existingMarker.branch === git.branch) {
+          return { ok: true, remote_sha: remoteSha, push_state: 'verified', real_check: true, evidence: existingMarker.source || null, strong: true, cross_machine: true, record_committed: false, idempotent: true, note: '同一 HEAD 已有强核验凭证：记账幂等完成，未重复查询远端、未产生 tracked 改动' }
+        }
         const { target, url: remoteUrl, error: pushErr } = await resolvePushRemote(rootPath, git)
         if (pushErr !== null) return { ok: false, reason: pushErr }
         let realCheck = false
         let evidence = null
-        if (target !== null && git.branch !== '') {
+        const receiptToken = String(args.verification_receipt || '').trim()
+        const receipt = receiptToken === '' ? null : verifiedPushReceipts.get(receiptToken)
+        const receiptValid = receipt !== null && receipt !== undefined && Date.now() - receipt.issued_at_ms <= 10 * 60 * 1000 && receipt.root_path === rootPath && receipt.branch === git.branch && receipt.local_head === git.head && receipt.remote_sha === remoteSha && (receipt.evidence === 'ls-remote' || receipt.evidence === 'gh-api')
+        if (target !== null && git.branch !== '' && receiptValid) {
+          realCheck = true
+          evidence = receipt.evidence
+        } else if (target !== null && git.branch !== '') {
           // 有远端 → 实查绑定：远端必须 == 本地 HEAD == 传入 SHA，任一不符拒绝（伪造 verified 无效）
           const lr = await sh('git ls-remote ' + target + ' refs/heads/' + git.branch, rootPath)
           if (lr.exitCode === 0) {
@@ -981,7 +1222,7 @@ export function apply(ctx) {
           dirty: git.dirty,
           current_summary: currentFacts(current),
           handoff_tail: handoffTailOf(handoff).slice(0, 1000),
-          open_tasks: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step })),
+          open_tasks: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step || null })),
           recent_memory: recent,
           sync_hint: git.tracking !== null ? '需同步远端时用 pwsh 执行：git fetch origin --prune（分叉则停止）' : null,
           read_only: true,
@@ -991,8 +1232,8 @@ export function apply(ctx) {
 
     ctx.tools.register(defineTool({
       name: 'baton_clock_in',
-      description: 'Baton：「上班啦」本地机械动作：git 三查 → 读交接/待办 → 生成任务表。远端同步（fetch/ff-only）由主会话 pwsh 执行（本工具返回提示命令）。版本闭环：读 .baton/version.json 版本锚，超过 config.update.check_interval_days 未检查更新时返回 version_info.check_hint（纯本地，无网络）。',
-      parameters: simple({ path: '项目根目录' }),
+      description: 'Baton：「上班啦」机械动作：插件自身先 fetch-before-lock，再做 git 三查 → 读交接/待办 → 生成任务表。调用者提供的裸 SHA 不能证明 fetch 新鲜度，fetched_remote_sha 已 fail-closed；插件 fetch 失败时保持只读。',
+      parameters: simple({ path: '项目根目录', fetched_remote_sha: '已弃用：裸 SHA 不能证明外层 fetch 新鲜度，传入即拒绝' }),
       output: output(),
       async execute(args) {
         const rootPath = await rootOf(args)
@@ -1033,14 +1274,21 @@ export function apply(ctx) {
         const branchMismatch = handoffBranch !== null && handoffBranch !== '' && handoffBranch !== git.branch
         // fetch-before-lock：抢锁前必须观测到远端最新 tip——
         // 本地 remote-tracking 陈旧会让 behind 误判为零而抢锁写 state（分裂脑）。
-        // fetch 失败（网络受限/无凭据/远端不可达）→ 零写零锁 fail-closed，并给出主会话 fetch 命令。
+        // fetch 失败（网络受限/无凭据/远端不可达）→ 零写零锁 fail-closed。
+        // 裸 SHA 无法证明本轮 fetch，新版不再提供“外层 fetch + SHA 回传”旁路。
         // 指向开源发布仓库的 remote 跳过 fetch（禁推守卫只警告、不触网）。
         let fetchError = null
         let fetchTarget = null
+        const fetchedRemoteSha = String(args.fetched_remote_sha || '').trim()
+        let freshRemoteTracking = false
         if (git.remotes.length > 0) {
           const cfgPre = await loadConfig(rootPath)
           const blockedPre = blockedRemoteList(cfgPre)
-          for (const r of git.remotes) {
+          // 优先 fetch 当前 upstream 所属 remote，保证随后 @{u} SHA 就是本次网络观察的结果；
+          // 其余 remote 仅在当前分支未设 upstream 时作为兼容回退。
+          const trackingRemote = git.tracking !== null && git.tracking.indexOf('/') > 0 ? git.tracking.slice(0, git.tracking.indexOf('/')) : null
+          const remoteCandidates = trackingRemote !== null ? [trackingRemote].concat(git.remotes.filter((r) => r !== trackingRemote)) : git.remotes
+          for (const r of remoteCandidates) {
             if (!/^[A-Za-z0-9._-]{1,100}$/.test(r)) continue
             const gu = await sh('git remote get-url ' + r, rootPath)
             if (gu.exitCode === 0 && blockedPre.indexOf(normalizeRemoteUrl(gu.out)) !== -1) continue
@@ -1048,14 +1296,19 @@ export function apply(ctx) {
             break
           }
         }
-        if (fetchTarget !== null) {
+        if (fetchedRemoteSha !== '') {
+          fetchError = 'fetched_remote_sha 已弃用：SHA 相等只证明 tracking 当前值，不能证明本轮真实 fetch、远端/分支/session 绑定或新鲜度；保持只读且不抢锁'
+        }
+        if (fetchTarget !== null && fetchError === null) {
           const f = await sh('git fetch ' + fetchTarget + ' --prune', rootPath)
           if (f.exitCode !== 0) {
-            fetchError = 'git fetch ' + fetchTarget + ' 失败：' + String((f.err || f.out || '').trim().slice(0, 120)) + '。网络 git 受限时请主会话用 pwsh 执行 git fetch ' + fetchTarget + ' --prune 后重试「上班啦」'
+            fetchError = 'git fetch ' + fetchTarget + ' 失败：' + String((f.err || f.out || '').trim().slice(0, 120)) + '。保持只读；修复插件所在 DSH 会话的网络/凭据后再重试 clock_in。无插件宿主应自行完成完整 fetch + tracking/ahead/behind 核验，不向插件回传裸 SHA'
+          } else {
+            freshRemoteTracking = true
           }
         }
         if (fetchError !== null) {
-          return { ok: false, ownership_conflict: true, behind_remote: null, fetch_error: fetchError, sync_hint: 'fetch 成功前保持只读（未抢锁、未写 state）；网络受限时由主会话 pwsh 完成 fetch 后重试' }
+          return { ok: false, sync_blocked: true, ownership_conflict: false, behind_remote: null, fetch_error: fetchError, sync_hint: 'fetch 成功前保持只读（未抢锁、未写 state）；DSH 插件需恢复本轮网络/凭据后重试，无插件宿主自行完成完整 Git 事实流程' }
         }
         // fetch 成功后重算 ahead/behind（基于新鲜 remote-tracking，而非调用前的陈旧快照）
         if (fetchTarget !== null && git.tracking !== null) {
@@ -1069,7 +1322,12 @@ export function apply(ctx) {
         // 本地落后于远端（behind>0）时禁止抢锁写 tracked state——
         // 先按 sync_hint 同步，同步后重跑 clock_in；落后工作副本只读报告，不制造 dirty 冲突。
         const behindRemote = git.behind !== null && git.behind > 0
-        const ownershipConflict = ownership.logical_state === 'holding' || behindRemote || (lastHandoffStatus !== null && (lastHandoffStatus.indexOf('持有中') !== -1 || lastHandoffStatus.indexOf('检查点') !== -1)) || handoffDiverged || branchMismatch
+        // 无法归属的 dirty 文件禁止认领。Baton 生命周期自身写入的管理域文件可在 release/重试后继续，
+        // 业务代码、未知文件及其它非管理域改动必须先由用户确认归属，避免把上一代理或用户的工作据为本会话所有。
+        const isClockInManaged = (f) => f.indexOf('docs/ai_memory/') === 0 || f === '.baton' || f.indexOf('.baton/') === 0 || f === '.gitignore' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || f === '.cursor/rules/baton.mdc' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f)
+        const unownedDirtyFiles = git.files_all.filter((f) => !isClockInManaged(f))
+        const unownedDirty = unownedDirtyFiles.length > 0
+        const ownershipConflict = ownership.logical_state === 'holding' || unownedDirty || behindRemote || (lastHandoffStatus !== null && (lastHandoffStatus.indexOf('持有中') !== -1 || lastHandoffStatus.indexOf('检查点') !== -1)) || handoffDiverged || branchMismatch
         // 单写入者锁：git update-ref 旧值 CAS 抢占 refs/baton/ownership-lock——
         // 旧值=40 个零 = 「ref 必须不存在」，内核级原子比较交换，并发双开恰好一个胜者（不再依赖 60ms 回读窗口）。
         const lockRef = 'refs/baton/ownership-lock'
@@ -1115,16 +1373,13 @@ export function apply(ctx) {
         const verifiedMarker = await readJsonAt(rootPath, '.baton/local/push-verified.json', null)
         // pending 只允许真实远端 receipt 清除：
         // ① push_state === 'verified'（baton_verify_push + record_push 实查后的记账）；
-        // ② 本工具 fetch 后实时 ls-remote 实查远端 tip == 本地 HEAD（本地「声明 SHA 是 HEAD 祖先」不算数——
-        //    未 push 的本地提交不会出现在远端，本地祖先关系无法证明已发布）；
+        // ② 本工具完成 fetch 后，以本次新鲜 upstream tracking tip == 本地 HEAD 为网络回执；
+        //    不再对同一远端追加 ls-remote（本地陈旧 tracking 不算数，必须 freshRemoteTracking=true）；
         // ③ 本机验收凭证 local_head == 当前 HEAD。
         let liveReceipt = false
-        if (state.repository !== undefined && state.repository !== null && state.repository.push_state === 'pending' && fetchTarget !== null) {
-          const lr = await sh('git ls-remote ' + fetchTarget + ' refs/heads/' + git.branch, rootPath)
-          if (lr.exitCode === 0) {
-            const remoteTip = (lr.out || '').trim().split(/\s+/)[0] || ''
-            liveReceipt = remoteTip !== '' && remoteTip === git.head
-          }
+        if (state.repository !== undefined && state.repository !== null && state.repository.push_state === 'pending' && freshRemoteTracking && git.tracking !== null) {
+          const trackingTip = await sh('git rev-parse @{u}', rootPath)
+          liveReceipt = trackingTip.exitCode === 0 && trackingTip.out.trim() !== '' && trackingTip.out.trim() === git.head
         }
         const pushStateVerified = state.repository !== undefined && state.repository !== null && state.repository.push_state === 'verified'
         const markerOkLocal = verifiedMarker !== null && verifiedMarker !== undefined && String(verifiedMarker.local_head || '') === git.head
@@ -1183,8 +1438,10 @@ export function apply(ctx) {
           },
           ownership_claimed: claimed,
           ownership_conflict: ownershipConflict || claimRace,
+          unowned_dirty_files: unownedDirtyFiles,
           claim_race: claimRace,
           pending_push: pendingPush,
+          fetch_evidence: fetchTarget !== null ? 'plugin-fetch' : 'no-fetch-target',
           version_info: versionInfo,
           current_task: tasks.current_task_id ? { task_id: tasks.current_task_id, active_work: tasks.active_work || null } : null,
           behind_remote: behindRemote,
@@ -1198,7 +1455,7 @@ export function apply(ctx) {
           current_summary: currentFacts(current),
           handoff_tail: handoffTailFull.slice(0, 800),
           task_table: table,
-          awaiting_tasks: awaiting.map((t) => ({ id: t.id, title: t.title, next_step: t.next_step })),
+          awaiting_tasks: awaiting.map((t) => ({ id: t.id, title: t.title, next_step: t.next_step || null })),
           no_task: table.length === 0 && awaiting.length === 0,
         }
       },
@@ -1228,43 +1485,64 @@ export function apply(ctx) {
         const lockWriter = lockInfo !== null && lockInfo !== undefined ? String(lockInfo.writer || '') : ''
         const lockRefExists = (await sh('git show-ref refs/baton/ownership-lock', rootPath)).exitCode === 0
         const heldBySomeone = lockRefExists && holderWriter !== '' && holderWriter !== 'null'
-        const owned = (!lockRefExists) || (myWriter !== null && (holderWriter === '' || holderWriter === 'null' || holderWriter === myWriter || lockWriter === myWriter))
+        // clock_out 已提交 released、但 ref 删除失败属于已知可恢复态：ref 仍阻断新会话，
+        // holder=baton 且 local writer 非空时允许本工具继续完成同一释放，不把它当作任意他人锁。
+        const recoverableCloseoutRelease = lockRefExists && stPre !== null && stPre !== undefined && stPre.ownership && stPre.ownership.logical_state === 'released' && holderWriter === 'baton' && myWriter !== null && lockWriter === myWriter
+        const owned = (!lockRefExists) || recoverableCloseoutRelease || (myWriter !== null && (holderWriter === '' || holderWriter === 'null' || holderWriter === myWriter || lockWriter === myWriter))
         if (!owned) {
           if (heldBySomeone && myWriter === null) {
             return { ok: false, reason: '无法确认本会话身份（宿主未提供 session）：锁 ref 存在且持有者非空，拒绝释放（fail-closed）。请在能提供会话身份的宿主中执行，或由用户明确说明「异常接手，我确认上一位代理已经停止」后由主会话人工处理', previous_state: stPre && stPre.ownership ? stPre.ownership.logical_state : 'unknown' }
           }
           return { ok: false, reason: '锁不属于本会话（holder=' + holderWriter.slice(0, 20) + '）：拒绝释放。异常接手场景：请用户明确说明「异常接手，我确认上一位代理已经停止」后再释放', previous_state: stPre && stPre.ownership ? stPre.ownership.logical_state : 'unknown' }
         }
-        // 释放原子锁 ref：与 state.ownership 同事务语义一起释放
-        await sh('git update-ref -d refs/baton/ownership-lock', rootPath)
+        if (!lockRefExists && stPre !== null && stPre !== undefined && stPre.ownership && stPre.ownership.logical_state === 'released') {
+          await tombstoneOwnershipLock(rootPath)
+          return { ok: true, previous_state: 'released', released: true, idempotent: true, note: '工作区已释放，无需重复写入 state 或交接。' }
+        }
+        const refRelease = await releaseOwnershipRef(rootPath)
+        if (!refRelease.ok) {
+          return { ok: false, released: false, release_incomplete: true, previous_state: stPre && stPre.ownership ? stPre.ownership.logical_state : 'unknown', reason: refRelease.reason }
+        }
+        if (recoverableCloseoutRelease) {
+          await tombstoneOwnershipLock(rootPath)
+          return { ok: true, previous_state: 'released', released: true, recovered_closeout: true, note: '已完成上次 closeout 遗留的原子锁释放；tracked state 与交接无需重复写入。' }
+        }
         const st = await assertJsonHealthy(rootPath, 'docs/ai_memory/state/project_state.json', {})
         const was = st.ownership ? st.ownership.logical_state : 'unknown'
         st.ownership = { writer: null, logical_state: 'released', released_at: nowIso() }
         st.revision = (st.revision || 0) + 1
         st.updated_at = nowIso()
         await writeTextAt(rootPath, 'docs/ai_memory/state/project_state.json', JSON.stringify(st, null, 2))
+        await tombstoneOwnershipLock(rootPath)
         await appendHandoffEntry(rootPath,
-          '### HO-' + todayLocal().replace(/-/g, '') + '-' + String(Date.now()).slice(-4) + '-Baton｜释放工作区\n- 交接状态：已释放\n- 原因：' + ((args.reason || '').trim() || '用户确认上一执行者已停止') + '\n',
-          '释放工作区 ' + todayLocal())
+          '### ' + hoId(agentLabel(args)) + '｜释放工作区\n- 时间：' + east8Stamp().display + '\n- 交接状态：已释放\n- 原因：' + ((args.reason || '').trim() || '用户确认上一执行者已停止') + '\n',
+          '释放工作区｜' + todayLocal(), agentLabel(args))
         return { ok: true, previous_state: was, released: true, note: '持有锁已解除；下次「上班啦」可正常接手。释放条目未 commit（随下次收尾入库）' }
       },
     }))
 
     ctx.tools.register(defineTool({
       name: 'baton_select',
-      description: 'Baton：「数字确认」持久化闭环：用户回复任务表编号后，把编号解析为任务 ID，置为当前任务（in_progress）并持久化 current_task_id/active_work，同步视图表。开工时可用 allowed_paths 把本任务的允许改动路径预锁进任务条目（收尾时超出预锁范围的改动必须用户豁免，见「下班啦」）。',
-      parameters: simple({ path: '项目根目录', number: '任务表编号（clock_in 返回的 1 起始编号）', allowed_paths: '本任务允许改动的路径前缀，逗号分隔（可选；预锁后收尾 diff 超出即阻断，需 user: 豁免）', implementation_policy: 'Lean Gate 策略（可选）：off | lite | full | strict（默认 full）', reuse_candidates: '复用搜索结果，逗号分隔（full/strict 必填：已查到的可复用 helper/模式）', native_candidates: 'stdlib/native/已装依赖检查结果，逗号分隔（full/strict 必填）', minimum_check: '最小实现检查 test/evidence id（full/strict 必填）', dependency_budget: '新增依赖预算（可选自然数；strict 超限阻断）', new_file_budget: '新增文件预算（可选自然数；strict 超限阻断）', abstraction_budget: '新增抽象预算（可选自然数；strict 超限阻断）', lean_exceptions: '用户明确例外 JSON 数组（可选）：[{"kind":"dependency|new_file|abstraction","match":"名称或路径"}]' }),
+      description: 'Baton：「数字确认」持久化闭环：选择任务并建立 FROZEN/BOUNDED/OPEN 契约。FROZEN/BOUNDED 必须预锁 allowed_paths；OPEN 与 Lean 例外必须由 DSH ctx.approval 当次一次性授权。',
+      parameters: simple({ path: '项目根目录', number: '任务表编号（clock_in 返回的 1 起始编号）', contract_level: '必填：FROZEN | BOUNDED | OPEN', allowed_paths: 'FROZEN/BOUNDED 必填：本任务允许改动的相对路径前缀，逗号分隔', open_reason: 'OPEN 必填：需要开放契约的具体原因', task_type: '任务类型（可选，由 AI 自动判断）：micro | bounded | complex | architecture | high_risk | review', implementation_policy: 'Lean Gate 策略（可选显式覆盖）：off | lite | full | strict；省略时按任务类型自动选择', reuse_candidates: '复用搜索结果，逗号分隔（full/strict 必填：已查到的可复用 helper/模式）', native_candidates: 'stdlib/native/已装依赖检查结果，逗号分隔（full/strict 必填）', minimum_check: '最小实现检查 test/evidence id（full/strict 必填）', dependency_budget: '新增依赖预算（可选自然数；strict 超限阻断）', new_file_budget: '新增文件预算（可选自然数；strict 超限阻断）', abstraction_budget: '新增抽象预算（可选自然数；strict 超限阻断）', lean_exceptions: '需宿主一次性授权的精确例外 JSON 数组（可选）：[{"kind":"dependency|new_file|abstraction","match":"名称或路径"}]' }),
       output: output(),
-      async execute(args) {
+      async execute(args, exec) {
         const rootPath = await rootOf(args)
         const num = Number(args.number)
         if (!Number.isInteger(num) || num < 1) return { ok: false, reason: 'number 必须是正整数（任务表编号）' }
+        const contractLevel = String(args.contract_level || '').trim().toUpperCase()
+        if (['FROZEN', 'BOUNDED', 'OPEN'].indexOf(contractLevel) === -1) return { ok: false, reason: 'contract_level 必填，只允许 FROZEN|BOUNDED|OPEN；禁止默认推断契约范围' }
+        const openReason = String(args.open_reason || '').trim()
+        const selectSecretHits = secretHits(openReason + '\n' + String(args.lean_exceptions || ''))
+        if (selectSecretHits.length > 0) return { ok: false, reason: 'Contract/Lean 参数疑似含敏感信息（' + selectSecretHits.join('、') + '）：拒绝写入或发送授权审计', secret_hits: selectSecretHits }
         const allowedPaths = (args.allowed_paths || '').split(',').map((s) => s.trim().replace(/\\/g, '/')).filter((s) => s !== '')
         // 路径字符集放宽：允许中文/空格等合法项目路径，仅禁止 .. 段、绝对路径与控制字符；尾部 / 归一化
         const badPath = (p) => p.indexOf('..') !== -1 || /^[A-Za-z]:/.test(p) || p.indexOf('/') === 0 || /[\u0000-\u001f]/.test(p)
         if (allowedPaths.some(badPath)) return { ok: false, reason: 'allowed_paths 只允许相对路径前缀（可含中文/空格；禁止 ..、绝对路径与控制字符）' }
         const normPaths = allowedPaths.map((p) => p.replace(/\/+$/, ''))
-        return opEnvelope(rootPath, 'select:' + num + ':' + normPaths.join('|').slice(0, 80), async () => {
+        if (contractLevel !== 'OPEN' && normPaths.length === 0) return { ok: false, reason: contractLevel + ' 契约必须提供非空 allowed_paths' }
+        if (contractLevel === 'OPEN' && openReason === '') return { ok: false, reason: 'OPEN 契约必须提供非空 open_reason，并取得宿主一次性授权' }
+        return opEnvelope(rootPath, 'select:' + num + ':' + contractLevel + ':' + normPaths.join('|').slice(0, 80), async () => {
           const ownGate = await ownershipGuard(rootPath)
         if (!ownGate.pass) return { ok: false, reason: '未持有单写入者锁：' + ownGate.reason }
         const tasks = await assertJsonHealthy(rootPath, 'docs/ai_memory/state/tasks.json', { tasks: [] })
@@ -1275,11 +1553,15 @@ export function apply(ctx) {
         task.phase = '进行中'
         task.updated_at = nowIso()
         if (normPaths.length > 0) task.allowed_paths = normPaths
-        // Lean Gate 策略：任务 Contract 可选 implementation_policy（off|lite|full|strict）
+        // Lean Gate 策略：用户不需要选择内部档位。省略时按 AI 判定的任务类型自动采用：
+        // micro/review=off，普通 bounded=lite，complex/architecture/high_risk=full；strict 仅显式启用。
         const policy = (args.implementation_policy || '').trim()
         if (policy !== '') {
           if (['off', 'lite', 'full', 'strict'].indexOf(policy) === -1) return { ok: false, reason: 'implementation_policy 只允许 off|lite|full|strict' }
         }
+        const taskTypeRaw = (args.task_type || task.task_type || task.risk_level || 'bounded').trim().toLowerCase().replace(/-/g, '_')
+        const taskType = ['micro', 'bounded', 'complex', 'architecture', 'high_risk', 'review'].indexOf(taskTypeRaw) !== -1 ? taskTypeRaw : 'bounded'
+        const automaticPolicy = (taskType === 'complex' || taskType === 'architecture' || taskType === 'high_risk') ? 'full' : (taskType === 'bounded' ? 'lite' : 'off')
         // Lean Gate 契约：预算/证据字段机械校验（select 时 fail-closed，不写任何状态）
         const parseBudget = (v) => {
           const s = (v === undefined || v === null ? '' : String(v)).trim()
@@ -1291,7 +1573,7 @@ export function apply(ctx) {
         const fileBudget = parseBudget(args.new_file_budget)
         const absBudget = parseBudget(args.abstraction_budget)
         if (depBudget === 'bad' || fileBudget === 'bad' || absBudget === 'bad') return { ok: false, reason: 'Lean 预算必须是自然数或留空（dependency_budget/new_file_budget/abstraction_budget）' }
-        const effPolicy = policy === '' ? undefined : policy
+        const effPolicy = policy === '' ? automaticPolicy : policy
         const reuse = (args.reuse_candidates || '').split(',').map((s) => s.trim()).filter((s) => s !== '')
         const native = (args.native_candidates || '').split(',').map((s) => s.trim()).filter((s) => s !== '')
         const minCheck = (args.minimum_check || '').trim()
@@ -1316,6 +1598,13 @@ export function apply(ctx) {
             return { ok: false, reason: 'lean_exceptions 必须是 JSON 数组：[{"kind":"dependency|new_file|abstraction","match":"名称或路径"}]' }
           }
         }
+        if (contractLevel === 'OPEN' || leanExceptions.length > 0) {
+          const approvalReason = contractLevel === 'OPEN'
+            ? 'Baton OPEN 契约：' + openReason + (leanExceptions.length > 0 ? '；同时登记 Lean 精确例外：' + JSON.stringify(leanExceptions) : '')
+            : 'Baton Lean 精确例外：' + JSON.stringify(leanExceptions)
+          const grant = await approvalOnce('baton_select', approvalReason, exec)
+          if (!grant.allowed) return { ok: false, reason: grant.reason, approval_outcome: grant.outcome }
+        }
         const leanContract = {
           policy: effPolicy,
           dependency_budget: depBudget,
@@ -1330,8 +1619,11 @@ export function apply(ctx) {
           task.implementation_policy = effPolicy
           task.lean_contract = leanContract
         }
+        task.contract_level = contractLevel
+        task.allowed_paths = contractLevel === 'OPEN' ? (normPaths.length > 0 ? normPaths : undefined) : normPaths
+        task.open_reason = contractLevel === 'OPEN' ? openReason : undefined
         tasks.current_task_id = task.id
-        tasks.active_work = { task_id: task.id, title: task.title, phase: '进行中', selected_at: nowIso(), selected_by: '编号 ' + num, allowed_paths: task.allowed_paths || null }
+        tasks.active_work = { task_id: task.id, title: task.title, phase: '进行中', selected_at: nowIso(), selected_by: '编号 ' + num, contract_level: contractLevel, allowed_paths: task.allowed_paths || null }
         tasks.revision = (tasks.revision || 0) + 1
         // 预锁防篡改快照：锁定的允许范围写进机器状态 state.contract，
         // 收尾以快照为准——执行者事后改 tasks.json 的 allowed_paths 无法放大预锁范围。
@@ -1344,21 +1636,15 @@ export function apply(ctx) {
           baseSha = prevSnap.base_sha
           baseDeps = Array.isArray(prevSnap.base_deps) ? prevSnap.base_deps : null
         }
-        // 例外窗口绑定——lean_exceptions 只能在任务首次 select（预算窗口建立）时登记；
-        // base 已锁定的重选只能收窄例外（删除条目），不得新增/放宽——执行者事后自填无效。
-        if (baseSha !== null && leanExceptions.length > 0) {
-          const prevExc = (prevSnap !== undefined && prevSnap !== null && prevSnap.lean && Array.isArray(prevSnap.lean.lean_exceptions)) ? prevSnap.lean.lean_exceptions : []
-          const newOnes = leanExceptions.filter((e) => !prevExc.some((p) => p !== null && typeof p === 'object' && p.kind === e.kind && p.match === e.match))
-          if (newOnes.length > 0) {
-            return { ok: false, reason: 'lean_exceptions 只能在任务首次 select（预算窗口建立）时登记；预算窗口已锁定（base SHA 已存在），重选只能收窄例外。新增例外需要用户在任务开工时明确确认（首次 select 登记），执行者事后自填无效' }
-          }
-        }
+        // 预算窗口的 base SHA 永不重置；但 clock_out 暴露出事前无法预见的超预算项后，
+        // 用户可以在对话中明确同意，再按返回指令重选同一任务登记精确例外。
+        // 该能力必须跨 DSH/Codex/Cursor/Claude 工作，因此不依赖某一宿主专属审批 API。
         if (baseSha === null) {
           try { baseSha = (await gitSnapshot(rootPath)).head } catch (e) { baseSha = '' }
           const p0 = await readJsonAt(rootPath, 'package.json', null)
           baseDeps = depNamesOf(p0)
         }
-        stDoc.contract = { task_id: task.id, allowed_paths: task.allowed_paths || null, locked_at: nowIso(), locked_rev: tasks.revision, lean: leanContract, base_sha: baseSha, base_deps: baseDeps }
+        stDoc.contract = { task_id: task.id, level: contractLevel, allowed_paths: task.allowed_paths || null, open_reason: contractLevel === 'OPEN' ? openReason : null, approval: (contractLevel === 'OPEN' || leanExceptions.length > 0) ? { outcome: 'allowed-once', audited_by: 'ctx.approval', granted_at: nowIso() } : null, locked_at: nowIso(), locked_rev: tasks.revision, lean: leanContract, base_sha: baseSha, base_deps: baseDeps }
         stDoc.revision = (stDoc.revision || 0) + 1
         stDoc.updated_at = nowIso()
         await writeTextAt(rootPath, 'docs/ai_memory/state/project_state.json', JSON.stringify(stDoc, null, 2))
@@ -1375,9 +1661,9 @@ export function apply(ctx) {
             await writeTextAt(rootPath, 'docs/ai_memory/tasks/task_progress.md', prog.slice(0, at) + row + prog.slice(at))
           }
         }
-        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_progress.md', '选定任务：' + task.id + ' ' + (task.title || ''))
-        return { ok: true, selected: task.id, title: task.title, next_step: task.next_step || null, note: '已持久化为当前任务；执行完成后用 baton_complete(task_id=' + task.id + ') 收尾' }
-        })
+        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_progress.md', '选定任务：' + task.id + ' ' + (task.title || ''), agentLabel(args))
+        return { ok: true, selected: task.id, title: task.title, task_type: taskType, implementation_policy: effPolicy, contract_level: contractLevel, next_step: task.next_step || null, note: '已持久化为当前任务；执行完成后用 baton_complete(task_id=' + task.id + ') 收尾' }
+        }, false)
       },
     }))
 
@@ -1386,7 +1672,7 @@ export function apply(ctx) {
       description: 'Baton：「下班啦」本地收尾：更新日报/状态/交接 → metrics 固化 + 月度报表 → git commit。存在非 Baton 管理域的改动时必须用 allowed_files 声明允许清单，越界或 protected 命中即阻断（不写不提交）。随后返回 push 命令，主会话执行 push 后用 baton_verify_push 完成远端 SHA 核验。',
       parameters: simple({ path: '项目根目录', summary: '今日工作摘要（写入交接）', next: '下一步建议（可选）', actual_model: '实际执行模型（可选，记入 Metrics）', reviewer_model: '实际复核模型（可选，记入 Metrics）', reviewer_agent_id: '复核代理身份（可选；仅声明 unverified，独立性需宿主事件证明，防假 Reviewer）', reviewer_run_id: '复核子代理会话 ID（可选；插件查宿主 subagent/descriptor 事件签发 Reviewer receipt，查无事件则标 unverified）', allowed_files: '允许改动的文件清单，逗号分隔（可选，用于越界核对）' }),
       output: output(),
-      async execute(args) {
+      async execute(args, exec) {
         const rootPath = await rootOf(args)
         const git = await gitSnapshot(rootPath)
         // 命令注入防护：分支名进入 push 命令前必须先过白名单，含 ;&| 等元字符的分支直接中止
@@ -1403,6 +1689,9 @@ export function apply(ctx) {
         const summary = (args.summary || '').trim()
         const next = (args.next || '').trim()
         const actualModel = (args.actual_model || 'unknown').trim()
+        const agent = agentLabel(args)
+        const e8 = east8Stamp()
+        const closeTopic = topicOf(summary, '下班收尾')
         const reviewerModel = (args.reviewer_model || 'unknown').trim()
         const reviewerAgentIdRaw = (args.reviewer_agent_id || '').trim() || null
         const reviewerRunIdRaw = (args.reviewer_run_id || '').trim()
@@ -1413,6 +1702,11 @@ export function apply(ctx) {
           return { ok: false, aborted: true, reason: '输入疑似含敏感信息（' + secHit.join('、') + '）：收尾已阻断（凭据绝不进入 Git 跟踪文档），请移除后重试', secret_hits: secHit }
         }
         const month = monthLocal()
+        const monthlyHtmlRel = 'docs/ai_memory/agent_metrics/' + month + '/index.html'
+        const reportSep = rootPath.indexOf('\\') !== -1 ? '\\' : '/'
+        const monthlyHtmlAbsolute = rootPath.replace(/[\\\/]+$/, '') + reportSep + monthlyHtmlRel.replace(/\//g, reportSep)
+        let monthlyHtmlStatus = 'unverified'
+        let monthlyHtmlError = null
         // 身份字段：假 Reviewer 检测按 agent/session 同源判定；身份不可验证时留空回落模型名判定
         const wSessCo = currentSession()
         const coAgentId = (wSessCo !== undefined && wSessCo !== null && wSessCo.id !== undefined) ? String(wSessCo.id) : null
@@ -1449,6 +1743,7 @@ export function apply(ctx) {
         // 收尾时真实 diff 超出预锁范围的改动必须用户明确豁免（allowed_files 以 user: 前缀声明），否则阻断——执行者事后自报吞不掉越界。
         const tasksDoc = await readJsonAt(rootPath, 'docs/ai_memory/state/tasks.json', { tasks: [] })
         const stateDoc = await readJsonAt(rootPath, 'docs/ai_memory/state/project_state.json', {})
+        const ownershipAtCloseoutStart = stateDoc && stateDoc.ownership ? { ...stateDoc.ownership } : null
         const currentTask = (tasksDoc.tasks || []).find((t) => t.id === tasksDoc.current_task_id)
         // 预锁以 state.contract 快照为准（select 时锁定，执行者改 tasks.json 无法放大范围）；无快照时回落到任务条目（旧数据兼容）
         const contractLock = (stateDoc && stateDoc.contract && stateDoc.contract.task_id === tasksDoc.current_task_id && Array.isArray(stateDoc.contract.allowed_paths)) ? stateDoc.contract.allowed_paths : null
@@ -1474,7 +1769,7 @@ export function apply(ctx) {
           const docsNames = docsEntries.map((e) => e.name)
           docsDirMemoryOnly = docsNames.length > 0 && docsNames.every((n) => n === 'ai_memory')
         }
-        const isBatonManaged = (f) => f.indexOf('docs/ai_memory/') === 0 || f === '.baton' || f.indexOf('.baton/') === 0 || f === '.gitignore' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f) || ((f === 'docs' || f === 'docs/') && docsDirMemoryOnly)
+        const isBatonManaged = (f) => f.indexOf('docs/ai_memory/') === 0 || f === '.baton' || f.indexOf('.baton/') === 0 || f === '.gitignore' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || f === '.cursor/rules/baton.mdc' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f) || ((f === 'docs' || f === 'docs/') && docsDirMemoryOnly)
         // 前缀必须匹配到路径边界：src/app 不得误放行 src/application.txt
         const inPath = (f, a) => f === a || f.indexOf(a + '/') === 0 || f.indexOf(a + '\\') === 0
         // 红线 5：allowed_files 为空时不放行任何非管理域改动——存在非 Baton 管理域改动必须声明允许清单
@@ -1514,7 +1809,7 @@ export function apply(ctx) {
         }
         // 边界文件门禁：规则载体（config/入口文件/SKILL 镜像/.gitignore）被改动必须用户豁免，
         // 执行者不能先改保护规则或入口约束再收尾。
-        const isBoundary = (f) => f === '.baton/config.json' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || f === '.gitignore' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f)
+        const isBoundary = (f) => f === '.baton/config.json' || f === 'AGENTS.md' || f === 'CLAUDE.md' || f === '.cursorrules' || f === '.cursor/rules/baton.mdc' || f === '.gitignore' || /^(\.agents|\.claude|\.cursor)\/skills\/baton\//.test(f)
         const boundaryViolations = git.files_all.filter((f) => isBoundary(f) && !userExempt.some((a) => inPath(f, a)))
         if (boundaryViolations.length > 0) {
           return {
@@ -1542,6 +1837,12 @@ export function apply(ctx) {
               then: '凭据绝不进入 Git：.env*、.npmrc、私钥文件、源码内 Token 等命中即阻断',
             },
           }
+        }
+        const exemptSecretHits = secretHits(userExempt.join('\n'))
+        if (exemptSecretHits.length > 0) return { ok: false, aborted: true, reason: 'user: 路径疑似含敏感信息：拒绝发送授权请求', secret_hits: exemptSecretHits, committed: false }
+        if (userExempt.length > 0) {
+          const grant = await approvalOnce('baton_clock_out', 'Baton 收尾范围一次性豁免：' + userExempt.join(', '), exec)
+          if (!grant.allowed) return { ok: false, failure: grant.reason, approval_outcome: grant.outcome, contract_violations: userExempt, committed: false }
         }
         // 单写入者锁门禁：写工具必须持有锁；置于范围门禁之后，保证越界/预锁阻断优先报告
         const ownGate = await ownershipGuard(rootPath)
@@ -1645,13 +1946,14 @@ export function apply(ctx) {
           if (resumeIdx < 1 && dailyExistingIdx === -1) {
             await writeIntent('daily')
             await appendTextAt(rootPath, dailyRel,
-              '\n## 下班收尾 ' + nowIso() + '\n\n- 摘要：' + (summary || '（无）') + '\n- 下一步：' + (next || '（无）') + '\n- 改动文件：' + fileSummary + '\n')
+              '\n## 下班收尾｜' + closeTopic + '｜' + e8.display + '｜' + agent + '\n\n- 时间：' + e8.display + '\n- 摘要：' + (summary || '（无）') + '\n- 下一步：' + (next || '（无）') + '\n- 改动文件：' + fileSummary + '\n- 已验证：未跑\n- 未验证项及原因：未跑\n- 凭据检查：未记录敏感信息\n')
             await writeStep('daily')
           }
           if (resumeIdx < 2) {
             await writeIntent('current')
             await updateCurrentFacts(rootPath,
-              '- 最近收尾：' + today + '\n- 摘要：' + (summary || '（无）') + '\n- 下一步：' + (next || '说「上班啦」继续') + '\n- 分支：' + git.branch + ' / HEAD：' + git.head + '\n')
+              '- 最近收尾：' + today + '\n- 摘要：' + (summary || '（无）') + '\n- 下一步：' + (next || '说「上班啦」继续') + '\n- 分支：' + git.branch + ' / HEAD：' + git.head + '\n',
+              closeTopic + '｜下班收尾', agent)
             await writeStep('current')
           }
           if (resumeIdx < 3) {
@@ -1661,9 +1963,9 @@ export function apply(ctx) {
             const indexAlready = (idxBefore.entries || []).some((e) => e.path === dailyRel && e.summary === summaryKey)
             if (!indexAlready) {
               await addIndexEntry(rootPath, {
-                id: 'ARCH-' + idSuffix(), document_type: 'daily_log', title: '下班收尾 ' + today,
+                id: 'ARCH-' + idSuffix(), document_type: 'daily_log', title: '下班收尾｜' + closeTopic,
                 time: { start: today, end: null }, modules: [dailyRel],
-                keywords: ['日报', '下班', today].concat(summary ? summary.slice(0, 40).split(/\s+/).slice(0, 5) : []),
+                keywords: ['日报', '下班', today, agent, closeTopic].concat(summary ? summary.slice(0, 40).split(/\s+/).slice(0, 5) : []),
                 summary: summaryKey,
                 task_ids: [], decision_ids: [], issue_ids: [],
                 path: dailyRel, line_start: dailyLineStart, updated_at: nowIso(),
@@ -1673,15 +1975,84 @@ export function apply(ctx) {
           }
           if (resumeIdx < 4) {
             await writeIntent('metrics')
-            const line = JSON.stringify({ ts: nowIso(), type: 'clock_out', branch: git.branch, dirty: git.dirty, files_changed: git.files.length, actual_model: actualModel, reviewer_model: reviewerModel, actual_agent_id: coAgentId, reviewer_agent_id: reviewerAgentId, reviewer_run_id: reviewerRunIdRaw === '' ? null : reviewerRunIdRaw, reviewer_receipt: reviewerReceipt }) + '\n'
-            await appendTextAt(rootPath, '.baton/local/metrics/' + today + '.jsonl', line)
+            // 稳定 event_id 绑定「日期 + 收尾起始 HEAD + 摘要」：metrics 固化后、local 清空前崩溃，
+            // 重试产生的新时间戳仍属于同一事件，不得把成功/失败/排行重复计数。
+            const clockOutEventId = 'clock_out:' + today + ':' + closeoutHead + ':' + encodeURIComponent(summary || '下班收尾').slice(0, 160)
+            const localMetricsRel = '.baton/local/metrics/' + today + '.jsonl'
+            const localBeforeMetrics = (await readTextAt(rootPath, localMetricsRel)) || ''
+            let dayMetrics = localBeforeMetrics
+            const eventNeedle = '"event_id":' + JSON.stringify(clockOutEventId)
+            if (localBeforeMetrics.indexOf(eventNeedle) === -1) {
+              const line = JSON.stringify({ ts: nowIso(), event_id: clockOutEventId, type: 'clock_out', branch: git.branch, dirty: git.dirty, files_changed: git.files.length, actual_model: actualModel, reviewer_model: reviewerModel, actual_agent_id: coAgentId, reviewer_agent_id: reviewerAgentId, reviewer_run_id: reviewerRunIdRaw === '' ? null : reviewerRunIdRaw, reviewer_receipt: reviewerReceipt }) + '\n'
+              dayMetrics += line
+              await writeTextRetry(rootPath, localMetricsRel, dayMetrics)
+            }
             const monthDir = 'docs/ai_memory/agent_metrics/' + month
-            // §44 固化：把当天全部 metrics（routing/task_complete/actual/clock_out）并入月度，而非只写 clock_out 一行；
-            // 固化后清零当天 local（已入月度，当天文件重新积累，避免一天多次下班重复追加）
-            const dayMetrics = (await readTextAt(rootPath, '.baton/local/metrics/' + today + '.jsonl')) || ''
-            await appendTextAt(rootPath, monthDir + '/runs.jsonl', dayMetrics)
-            await writeTextAt(rootPath, '.baton/local/metrics/' + today + '.jsonl', '')
-            await writeTextAt(rootPath, monthDir + '/index.html', await monthlyHtml(rootPath, monthDir, month, today, git, actualModel, reviewerModel))
+            // 把所有尚未固化的本机日期文件按事件时间归月；started 与 evaluated 可跨日/跨月，
+            // 历史路由再按 attempt_id 配对。固化仍以 event_id 去重，清空前崩溃重试不会重复统计。
+            const metricKey = (raw) => {
+              try {
+                const parsed = JSON.parse(raw)
+                return parsed !== null && typeof parsed === 'object' && typeof parsed.event_id === 'string' && parsed.event_id !== '' ? 'event:' + parsed.event_id : 'raw:' + raw
+              } catch (e) { return 'raw:' + raw }
+            }
+            const localRels = new Set([localMetricsRel])
+            try {
+              const localDir = await fs.resolve('.baton/local/metrics', { cwd: rootPath })
+              for (const e of await fs.listDir(localDir)) if (e.type === 'file' && /\.jsonl$/i.test(e.name || '')) localRels.add('.baton/local/metrics/' + e.name)
+            } catch (e) { /* 当天文件已在集合中 */ }
+            const grouped = new Map()
+            for (const rel of localRels) {
+              const content = rel === localMetricsRel ? dayMetrics : ((await readTextAt(rootPath, rel)) || '')
+              for (const raw of content.split('\n').filter((x) => x.trim() !== '')) {
+                let eventMonth = month
+                try {
+                  const parsed = JSON.parse(raw)
+                  const stamp = east8Stamp(parsed.ended_at || parsed.started_at || parsed.ts)
+                  eventMonth = stamp.date.slice(0, 7).replace('-', '/')
+                } catch (e) { /* 无效旧行归当前月并保留 */ }
+                if (!grouped.has(eventMonth)) grouped.set(eventMonth, [])
+                grouped.get(eventMonth).push(raw)
+              }
+            }
+            let monthMetricsAfter = (await readTextAt(rootPath, monthDir + '/runs.jsonl')) || ''
+            for (const [targetMonth, lines] of grouped.entries()) {
+              const runsRel = 'docs/ai_memory/agent_metrics/' + targetMonth + '/runs.jsonl'
+              const before = targetMonth === month ? monthMetricsAfter : ((await readTextAt(rootPath, runsRel)) || '')
+              const seenMetrics = new Set(before.split('\n').filter((x) => x.trim() !== '').map(metricKey))
+              const additions = []
+              for (const raw of lines) {
+                const key = metricKey(raw)
+                if (seenMetrics.has(key)) continue
+                seenMetrics.add(key)
+                additions.push(raw)
+              }
+              const after = before + (additions.length > 0 ? additions.join('\n') + '\n' : '')
+              if (additions.length > 0) await writeTextRetry(rootPath, runsRel, after)
+              if (targetMonth === month) monthMetricsAfter = after
+            }
+            for (const rel of localRels) await writeTextAt(rootPath, rel, '')
+            const oldHtml = (await readTextAt(rootPath, monthDir + '/index.html')) || ''
+            try {
+              const generatedHtml = await monthlyHtml(rootPath, monthDir, month, today, git, actualModel, reviewerModel, monthMetricsAfter)
+              await writeTextRetry(rootPath, monthDir + '/index.html', generatedHtml)
+              const verifiedHtml = (await readTextAt(rootPath, monthDir + '/index.html')) || ''
+              if (!verifiedHtml.startsWith('<!doctype html>') || verifiedHtml.indexOf('</html>') === -1) throw new Error('生成文件完整性校验失败')
+              monthlyHtmlStatus = 'generated'
+            } catch (e) {
+              monthlyHtmlError = String(e && e.message ? e.message : e)
+              if (oldHtml.startsWith('<!doctype html>') && oldHtml.indexOf('</html>') !== -1) {
+                try {
+                  await writeTextRetry(rootPath, monthDir + '/index.html', oldHtml)
+                  monthlyHtmlStatus = 'old'
+                } catch (restoreError) {
+                  monthlyHtmlStatus = 'missing'
+                  monthlyHtmlError += '；旧版恢复失败：' + String(restoreError && restoreError.message ? restoreError.message : restoreError)
+                }
+              } else {
+                monthlyHtmlStatus = 'missing'
+              }
+            }
             await writeStep('metrics')
           }
           if (resumeIdx < 5) {
@@ -1693,10 +2064,10 @@ export function apply(ctx) {
             const handoffAlready = summary !== '' && lastSegment.indexOf('- 任务：' + summary) !== -1
             if (!handoffAlready) {
               await appendHandoffEntry(rootPath,
-                '### HO-' + today.replace(/-/g, '') + '-' + String(Date.now()).slice(-4) + '-Baton｜' + git.branch + ' → 下一执行者\n' +
-                '- 交接状态：可接手\n- 任务：' + (summary || '（无）') + '\n- 分支 / HEAD：' + git.branch + ' / ' + git.head + '\n' +
+                '### ' + hoId(agent) + '｜下班收尾｜' + closeTopic + '\n' +
+                '- 时间：' + e8.display + '\n- 交接状态：可接手\n- 任务：' + (summary || '（无）') + '\n- 分支 / HEAD：' + git.branch + ' / ' + git.head + '\n' +
                 '- 改动文件：' + fileSummary + '\n- 下一步：' + (next || '（无）') + '\n- 凭据检查：未记录敏感信息',
-                '下班收尾 ' + today)
+                '下班收尾｜' + closeTopic, agent)
             }
             await writeStep('handoff')
           }
@@ -1726,12 +2097,17 @@ export function apply(ctx) {
           }
         }
         let recordCommitOk = false
+        let releaseOk = false
+        let releaseError = null
         let commit1HeadForToken = undefined
         if (committed) {
           // 发布记录语义：remote_sha/last_published_sha = 本次收尾「内容提交」SHA，push_state='pending'；
           // push 与核验完成后由 baton_record_push 写本机验收凭证（不进 Git，工作区保持干净）。
           // 重试幂等：上一轮失败已写过 state 时不再重复 bump。
-          const afterCommit1 = await gitSnapshot(rootPath)
+          const afterCommit1 = await verifiedGitHead(rootPath)
+          if (!afterCommit1.ok) {
+            addError = '无法取得 commit1 后 HEAD：' + afterCommit1.reason
+          } else {
           commit1HeadForToken = afterCommit1.head
           await writeTextAt(rootPath, tokenPath, JSON.stringify({ date: today, head_at_start: closeoutHead, docs_done: true, commit1_head: afterCommit1.head, updated_at: nowIso() }, null, 2))
           const state = await assertJsonHealthy(rootPath, 'docs/ai_memory/state/project_state.json', {})
@@ -1748,11 +2124,11 @@ export function apply(ctx) {
             state.repository.push_state = 'pending'
             state.repository.push_verified_at = null
             state.last_handoff = { summary, next, updated_at: nowIso(), branch: git.branch }
-            state.ownership = { writer: 'baton', logical_state: 'released', updated_at: nowIso() }
-            await writeTextAt(rootPath, 'docs/ai_memory/state/project_state.json', JSON.stringify(state, null, 2))
           }
-          // 释放原子锁 ref：下班即释放，与 state 释放同事务
-          await sh('git update-ref -d refs/baton/ownership-lock', rootPath)
+          // release 必须和 commit2 成功绑定：commit2 失败时仍保留/恢复 holding，
+          // 这样返回的“直接重试 clock_out”才不会被 ownershipGuard 自己拦死。
+          state.ownership = { writer: 'baton', logical_state: 'released', updated_at: nowIso() }
+          await writeTextAt(rootPath, 'docs/ai_memory/state/project_state.json', JSON.stringify(state, null, 2))
           const add2 = await sh('git add docs/ai_memory/state/project_state.json', rootPath)
           if (add2.exitCode === 0) {
             const commit2 = await sh('git commit -m "baton: 记录发布 last_published_sha"', rootPath)
@@ -1761,19 +2137,49 @@ export function apply(ctx) {
           } else {
             addError = '发布记录 git add 失败：' + add2.err
           }
+          if (recordCommitOk) {
+            // 只有发布记录提交成功，才真正释放原子锁。
+            const refRelease = await releaseOwnershipRef(rootPath)
+            releaseOk = refRelease.ok
+            if (releaseOk) {
+              await tombstoneOwnershipLock(rootPath)
+            } else {
+              releaseError = refRelease.reason
+              addError = 'commit2 已完成，但 ownership 释放未完成：' + refRelease.reason
+            }
+          } else if (ownershipAtCloseoutStart !== null && ownershipAtCloseoutStart.logical_state === 'holding') {
+            // commit2/add2 失败：恢复调用开始时的持有态并重新暂存，供 phase2Retry 直接续跑。
+            const recoverState = await assertJsonHealthy(rootPath, 'docs/ai_memory/state/project_state.json', {})
+            recoverState.ownership = ownershipAtCloseoutStart
+            recoverState.updated_at = nowIso()
+            await writeTextAt(rootPath, 'docs/ai_memory/state/project_state.json', JSON.stringify(recoverState, null, 2))
+            await sh('git add docs/ai_memory/state/project_state.json', rootPath)
+          }
+          }
         }
         await writeTextAt(rootPath, tokenPath, JSON.stringify({ date: today, head_at_start: closeoutHead, docs_done: true, commit1_head: commit1HeadForToken, committed, record_committed: recordCommitOk, updated_at: nowIso() }, null, 2))
-        const finalGit = await gitSnapshot(rootPath)
+        const finalHead = await verifiedGitHead(rootPath)
+        if (!finalHead.ok && addError === null) addError = '无法取得收尾后 HEAD：' + finalHead.reason
+        const finalGit = { head: finalHead.head, branch: git.branch, remotes: git.remotes }
         const failed = addError !== null
+        const reportNow = (await readTextAt(rootPath, monthlyHtmlRel)) || ''
+        const reportExists = reportNow.startsWith('<!doctype html>') && reportNow.indexOf('</html>') !== -1
+        if (monthlyHtmlStatus === 'unverified') monthlyHtmlStatus = reportExists ? 'old' : 'missing'
+        const monthlyHtmlLine = reportExists
+          ? (monthlyHtmlStatus === 'old' ? '统计 HTML（旧版，本次未刷新）：' : '统计 HTML：') + monthlyHtmlAbsolute
+          : '统计 HTML：未生成（' + (monthlyHtmlError || '文件不存在或完整性校验失败') + '）'
         return {
           ok: !failed,
           committed,
           record_committed: recordCommitOk,
+          released: releaseOk,
+          release_incomplete: recordCommitOk && !releaseOk,
+          release_error: releaseError,
           docs_skipped: docsSkipped,
           local_head: finalGit.head,
           push_state: committed ? 'pending' : null,
           docs_updated: !docsSkipped,
-          metrics: { today, monthly_html: 'docs/ai_memory/agent_metrics/' + month + '/index.html', actual_model: actualModel, reviewer_model: reviewerModel },
+          metrics: { today, monthly_html: monthlyHtmlRel, monthly_html_absolute: reportExists ? monthlyHtmlAbsolute : null, monthly_html_status: monthlyHtmlStatus, monthly_html_line: monthlyHtmlLine, actual_model: actualModel, reviewer_model: reviewerModel },
           scope_violations: scopeViolations,
           protected_violations: protectedViolations,
           size_warnings: sizeWarnings,
@@ -1788,7 +2194,9 @@ export function apply(ctx) {
             then: '本地仓库无远端：无需 push；核验用 baton_verify_push（remote_sha=本地 HEAD、source=local）+ baton_record_push 记账',
           }),
           note: failed
-            ? '收尾失败：' + addError + '（文档写入已由 closeout token 标记，直接重试 clock_out 即可：文档不会重复追加，只重跑 commit）'
+            ? (releaseError !== null
+              ? '收尾失败：' + addError + '（发布记录已提交但原子锁仍在，禁止 push；请先调用 baton_release 完成释放）'
+              : '收尾失败：' + addError + '（文档写入已由 closeout token 标记，直接重试 clock_out 即可：文档不会重复追加，只重跑 commit）')
             : (committed ? '两次本地提交（收尾 + 发布记录）已就绪，随一次 push 推送；push 核验后记得 baton_record_push 记账' : '本地无新增提交（工作区干净或已在之前提交）'),
           failure: addError,
         }
@@ -1825,7 +2233,7 @@ export function apply(ctx) {
               const seg2 = segEnd2 === -1 ? finRep2.slice(idx2) : finRep2.slice(idx2, segEnd2)
               const rest2 = segEnd2 === -1 ? '' : finRep2.slice(segEnd2)
               await writeTextAt(rootPath, 'docs/ai_memory/tasks/task_finished.md', finRep2.slice(0, idx2) + seg2.replace(/- 用户验收：未验收/, '- 用户验收：已验收（' + todayLocal() + '）') + rest2)
-              await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '断点修复：用户验收通过 ' + taskId + ' ' + found.title)
+              await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '断点修复：用户验收通过 ' + taskId + ' ' + found.title, agentLabel(args))
               return { ok: true, completed: taskId, status: 'completed', note: '任务已验收过：完成条目验收标注缺失，已修复补齐（崩溃断点恢复），未重复任何副作用' }
             }
             return { ok: true, completed: taskId, status: 'completed', note: '任务已验收过（无需重复）：未做任何写入' }
@@ -1861,7 +2269,7 @@ export function apply(ctx) {
           } else {
             await appendTextAt(rootPath, 'docs/ai_memory/tasks/task_finished.md', '\n## ' + taskId + '｜' + found.title + '\n- 完成日期：' + todayLocal() + '\n- 用户验收：已验收（' + todayLocal() + '）\n- 结果：' + (args.note || '') + '\n')
           }
-          await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '用户验收通过：' + taskId + ' ' + found.title)
+          await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '用户验收通过：' + taskId + ' ' + found.title, agentLabel(args))
           await appendTextAt(rootPath, '.baton/local/metrics/' + todayLocal() + '.jsonl',
             JSON.stringify({ ts: nowIso(), type: 'task_accept', task_id: taskId, actual_model: (args.actual_model || 'unknown').trim() }) + '\n')
           const open = (tasks.tasks || []).filter((t) => t.status !== 'completed' && t.status !== 'cancelled')
@@ -1870,7 +2278,7 @@ export function apply(ctx) {
             completed: taskId,
             status: 'completed',
             next: (args.next || '无').trim(),
-            remaining: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step })),
+            remaining: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step || null })),
             note: '任务已验收完成（状态机终态）；下班时才 commit/push',
           }
         }
@@ -1883,7 +2291,7 @@ export function apply(ctx) {
           if (segRep === '') {
             await appendTextAt(rootPath, 'docs/ai_memory/tasks/task_finished.md',
               '\n## ' + taskId + '｜' + found.title + '\n- 完成日期：' + todayLocal() + '\n- 用户验收：未验收\n- 结果：' + (args.note || '') + '\n- 证据：（待补充命令 → 结果）\n- 边界：（待补充）\n')
-            await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '断点修复：完成任务 ' + taskId + ' ' + found.title)
+            await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '断点修复：完成任务 ' + taskId + ' ' + found.title, agentLabel(args))
             return { ok: true, completed: taskId, status: 'awaiting_acceptance', note: '任务已在「待验收」但完成条目缺失：已修复补齐（崩溃断点恢复），等待用户验收 accept' }
           }
           return { ok: true, completed: taskId, status: 'awaiting_acceptance', note: '任务已在「待验收」：无需重复 finish，未做任何写入（等待用户验收 accept）' }
@@ -1897,14 +2305,14 @@ export function apply(ctx) {
         found.updated_at = nowIso()
         tasks.revision = (tasks.revision || 0) + 1
         await writeTextAt(rootPath, 'docs/ai_memory/state/tasks.json', JSON.stringify(tasks, null, 2))
-        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '完成任务：' + found.title)
+        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '完成任务：' + found.title, agentLabel(args))
         await appendTextAt(rootPath, 'docs/ai_memory/tasks/task_finished.md',
           '\n## ' + taskId + '｜' + found.title + '\n- 完成日期：' + todayLocal() + '\n- 用户验收：未验收\n- 结果：' + (args.note || '') + '\n- 证据：（待补充命令 → 结果）\n- 边界：（待补充）\n')
         // 视图同步：先把任务行从 todo/progress 表机械移除（不再只追加修订说明），再写修订记录留痕
         await removeTaskRow(rootPath, 'docs/ai_memory/tasks/task_todo.md', taskId)
         await removeTaskRow(rootPath, 'docs/ai_memory/tasks/task_progress.md', taskId)
-        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_todo.md', '完成任务：' + taskId + ' ' + found.title + '（已移出待办）')
-        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_progress.md', '完成任务：' + taskId + ' ' + found.title + '（已移出进行中）')
+        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_todo.md', '完成任务：' + taskId + ' ' + found.title + '（已移出待办）', agentLabel(args))
+        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_progress.md', '完成任务：' + taskId + ' ' + found.title + '（已移出进行中）', agentLabel(args))
         await addIndexEntry(rootPath, {
           id: 'ARCH-' + idSuffix(), document_type: 'task_record', title: found.title,
           time: { start: todayLocal(), end: null }, modules: ['docs/ai_memory/tasks/task_finished.md'],
@@ -1920,7 +2328,7 @@ export function apply(ctx) {
           completed: taskId,
           status: 'awaiting_acceptance',
           next: (args.next || '无').trim(),
-          remaining: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step })),
+          remaining: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step || null })),
           warning: '任务已置「待验收」（用户未验收）：请按任务验收标准补齐证据（命令 → 结果）写入 task_finished 证据行；用户验收通过后调用 baton_complete(task_id=' + taskId + ', action=accept) 置完成',
           note: '任务已关闭进入待验收；下班时才 commit/push',
         }
@@ -1967,7 +2375,7 @@ export function apply(ctx) {
         }
         const superseded = outLines.join('\n')
         if (superseded !== fileBefore) await writeTextAt(rootPath, file, superseded)
-        await appendRevision(rootPath, file, '保存设计规范：' + title)
+        await appendRevision(rootPath, file, '保存设计规范：' + title, agentLabel(args))
         await appendTextAt(rootPath, file,
           '\n## ' + dsgId + '｜' + title + '\n- 日期：' + todayLocal() + '\n- 状态：当前有效\n- 事实：' + facts + '\n- 冲突处理：本分册旧「当前有效」条目已自动标「已取代」；跨分册冲突由 AI 标注\n')
         // line_start 修正：追加与修订行完成后按条目实际行号定位，避免偏一行
@@ -2007,22 +2415,25 @@ export function apply(ctx) {
         const gitNow = await gitSnapshot(rootPath)
         const fileSummary = gitNow.files_count === 0 ? '无'
           : (gitNow.files_count > 30 ? gitNow.files.join('、') + ' 等共 ' + gitNow.files_count + ' 个文件' : gitNow.files.join('、'))
+        const agent = agentLabel(args)
+        const e8 = east8Stamp()
+        const saveTopic = topicOf(args.summary, '中途存档')
         await appendTextAt(rootPath, dailyRel,
-          '\n## 中途存档 ' + nowIso() + '\n\n- 摘要：' + (args.summary || '') + '\n- 下一步：' + (args.next || '') + '\n- 分支 / HEAD：' + gitNow.branch + ' / ' + gitNow.head + '\n- 改动文件：' + fileSummary + '\n- 已验证：（待补）\n- 未验证项及原因：（待补）\n- 阻塞：（无）\n- 凭据检查：未记录敏感信息\n')
+          '\n## 中途存档｜' + saveTopic + '｜' + e8.display + '｜' + agent + '\n\n- 时间：' + e8.display + '\n- 摘要：' + (args.summary || '') + '\n- 下一步：' + (args.next || '') + '\n- 分支 / HEAD：' + gitNow.branch + ' / ' + gitNow.head + '\n- 改动文件：' + fileSummary + '\n- 已验证：未跑\n- 未验证项及原因：未跑\n- 阻塞：（无）\n- 凭据检查：未记录敏感信息\n')
         await updateCurrentFacts(rootPath,
-          '- 最近存档：' + today + '\n- 摘要：' + (args.summary || '') + '\n- 下一步：' + (args.next || '') + '\n')
-        // 写档顺序（SKILL 原则 3）：索引 → handoff 最后写
+          '- 最近存档：' + today + '\n- 摘要：' + (args.summary || '') + '\n- 下一步：' + (args.next || '') + '\n',
+          saveTopic + '｜中途存档', agent)
         await addIndexEntry(rootPath, {
-          id: 'ARCH-' + idSuffix(), document_type: 'checkpoint', title: '中途存档 ' + today,
+          id: 'ARCH-' + idSuffix(), document_type: 'checkpoint', title: '中途存档｜' + saveTopic,
           time: { start: today, end: null }, modules: ['docs/ai_memory/daily_log/daily_' + today + '.md'],
-          keywords: ['存档', '检查点', today], summary: (args.summary || '').slice(0, 60),
+          keywords: ['存档', '检查点', today, agent, saveTopic], summary: (args.summary || '').slice(0, 60),
           task_ids: [], decision_ids: [], issue_ids: [],
           path: 'docs/ai_memory/daily_log/daily_' + today + '.md', line_start: null, updated_at: nowIso(),
         })
         await appendHandoffEntry(rootPath,
-          '### HO-' + today.replace(/-/g, '') + '-' + String(Date.now()).slice(-4) + '-Baton｜检查点\n' +
-          '- 交接状态：检查点（不释放工作区）\n- 摘要：' + (args.summary || '') + '\n- 下一步：' + (args.next || ''),
-          '中途存档 ' + today)
+          '### ' + hoId(agent) + '｜中途存档｜' + saveTopic + '\n' +
+          '- 时间：' + e8.display + '\n- 交接状态：检查点（不释放工作区）\n- 摘要：' + (args.summary || '') + '\n- 下一步：' + (args.next || ''),
+          '中途存档｜' + saveTopic, agent)
         return { ok: true, saved: true, note: '已存档；未 commit/push' }
         })
       },
@@ -2041,7 +2452,7 @@ export function apply(ctx) {
         if (initHits.length > 0) return { ok: false, reason: 'project_name 疑似含敏感信息（' + initHits.join('、') + '）：拒绝写入（凭据绝不进入 Git 跟踪文档）', secret_hits: initHits }
         const created = []
         const skipped = []
-        const templates = inlineTemplates(name)
+        const templates = inlineTemplates(name, agentLabel(args))
         for (const rel of Object.keys(templates)) {
           const existing = await readTextAt(rootPath, rel)
           const want = templates[rel] || ''
@@ -2151,6 +2562,29 @@ export function apply(ctx) {
         for (const [rel, seg] of entrySegs) await upsertEntrySegment(rel, seg, 'Baton 项目协作入口')
         // P0-2：npm 组合包内置真 SKILL 时直接镜像（绝不覆盖已有 SKILL.md）；无包环境退化为 README 占位提示
         const pkgDir = typeof BATON_PKG_DIR !== 'undefined' ? BATON_PKG_DIR : null
+        let mdcSeg = null
+        if (pkgDir !== null) {
+          try {
+            const mt = await fs.resolve(pkgDir + '/templates/adapter/CURSOR.rules.mdc')
+            const mi = await fs.stat(mt)
+            if (mi !== undefined) mdcSeg = await fs.readText(mt)
+          } catch (e) { mdcSeg = null }
+        }
+        if (mdcSeg === null) {
+          mdcSeg = '---\ndescription: Baton 项目协作入口。口令（上班啦/下班啦等）必须按 Baton skill 执行。\nalwaysApply: true\n---\n\n# Baton 项目协作入口（Cursor 端，勿删此段）\n\n本项目使用 Baton 协作系统（skill：`baton`，位于 `.cursor/skills/baton/SKILL.md`）。规则：\n\n1. 用户说「上班啦」「下班啦」「继续工作」「保存设计规范」「完成」「更新项目文档」「Baton init」、回复任务编号、或 Git 自然语言请求时，**必须按 baton skill 执行**；本环境没有 `baton_*` 工具时，按 SKILL 的「无插件模式」章节用 git+文件手工等价执行。\n2. 项目真相 = `docs/ai_memory/`（Git 同步，唯一长期记忆，禁止另建第二套）；`.baton/` 为本机私有。\n3. 事实优先级：Git / 真实文件 / 新鲜验证 > `state/*.json` > 交接/日报 > 聊天自述。\n4. 历史只增不改（只追加或标「已取代」）；危险 Git（force push / reset --hard / 危险 clean / 未授权 rebase）禁止。\n5. 未做远端 SHA 核验（`git ls-remote origin <分支>` == 本地 HEAD）不得报告「下班完成」。\n6. 查询历史先查 `state/archive_index.json`，再只读命中文件片段；禁止全量读取 `docs/ai_memory`。\n'
+        }
+        const mdcRel = '.cursor/rules/baton.mdc'
+        const existingMdc = await readTextAt(rootPath, mdcRel)
+        if (existingMdc === null) {
+          await writeTextAt(rootPath, mdcRel, mdcSeg)
+          adapters.push(mdcRel + '（Cursor rules）')
+        } else if (pkgDir !== null && String(existingMdc).indexOf('Baton 项目协作入口') !== -1) {
+          const nlMdc = (s) => String(s).replace(/\r\n/g, '\n')
+          if (nlMdc(existingMdc) !== nlMdc(mdcSeg)) {
+            await writeTextAt(rootPath, mdcRel, mdcSeg)
+            adapters.push(mdcRel + '（Cursor rules）')
+          }
+        }
         let bundledSkill = null
         if (pkgDir !== null) {
           try {
@@ -2442,7 +2876,8 @@ export function apply(ctx) {
           }
           return hits
         }
-        const copies = ['skills/baton/SKILL.md', 'plugin/baton.js', 'README.md', 'readme/README.zh.md', 'readme/README.zh-TW.md', 'readme/README.ja.md', 'readme/README.ko.md', 'readme/README.fr.md', 'readme/README.de.md', 'readme/README.es.md', 'readme/README.pt.md', 'readme/README.ru.md', 'readme/README.tr.md', 'readme/README.ar.md', 'readme/README.th.md', 'LICENSE', 'package.json', 'index.mjs', 'cordis.patch.yml', 'gittop.png', 'scripts/baton-install.ps1', 'scripts/baton-migrate.ps1', 'scripts/baton-sync.ps1']
+        // 导出只保留用户安装和运行 Baton 必需的文件；开发源码、测试、翻译、图片、CI 与维护脚本均不公开。
+        const copies = ['README.md', 'LICENSE', 'package.json', 'index.mjs', 'cordis.patch.yml', 'skills/baton/SKILL.md', 'skills/baton-lean-review/SKILL.md', 'skills/baton-debt/SKILL.md', 'skills/baton-doctor/SKILL.md', 'scripts/baton-install.ps1', 'scripts/baton-migrate.ps1', 'scripts/baton-sync.ps1', 'scripts/baton-uninstall.ps1', 'scripts/baton-report.mjs']
         for (const dir of ['templates/ai_memory', 'templates/baton', 'templates/adapter']) {
           const t = await fs.resolve(dir, { cwd: rootPath })
           const entries = await fs.listDir(t).catch(() => [])
@@ -2537,14 +2972,16 @@ export function apply(ctx) {
 
     ctx.tools.register(defineTool({
       name: 'baton_route',
-      description: 'Baton：按任务类型返回推荐执行模型（provider/model/reasoning + fallback 链），并把推荐决策记入 Metrics。改模型策略只改 config.json。',
-      parameters: simple({ path: '项目根目录', task_type: 'micro | bounded | complex | architecture | high_risk | review' }),
+      description: 'Baton：按任务类型与最近 30 天同宿主可信样本返回推荐执行模型，并追加 route_decided 事件。样本不足 5 次时使用 host-default，不自适应。',
+      parameters: simple({ path: '项目根目录', task_id: '任务 ID（必填）', task_type: 'micro | bounded | complex | architecture | high_risk | review' }),
       output: output(),
       async execute(args) {
         const rootPath = await rootOf(args)
+        const taskId = String(args.task_id || '').trim()
+        if (!/^[A-Za-z0-9_\-]{1,64}$/.test(taskId)) return { ok: false, reason: 'task_id 必填，且只允许字母/数字/下划线/连字符（1-64 位）' }
         const type = (args.task_type || 'bounded').trim()
         // B-01：route 纳入 operation envelope（只记 intent/failed/done 不短路——返回推荐数据给调用方）
-        return opEnvelope(rootPath, 'route:' + type + ':' + todayLocal(), async () => {
+        return opEnvelope(rootPath, 'route:' + taskId + ':' + type + ':' + todayLocal(), async () => {
           const ownGate = await ownershipGuard(rootPath)
           if (!ownGate.pass) return { ok: false, reason: '未持有单写入者锁：' + ownGate.reason }
           const config = await loadConfig(rootPath)
@@ -2556,42 +2993,84 @@ export function apply(ctx) {
             const m = byTag(tag)
             return m ? { provider: m.provider || 'deepseek', model: m.id, reasoning: row.reasoning || 'high' } : null
           }
-          const rec = { ts: nowIso(), type: 'routing', task_type: type }
-          if (row.mode === 'main-session') {
-            const r = { mode: 'main-session', note: '主会话直接执行，不派代理' }
-            rec.recommended = r
-            rec.fallback = []
-            await appendTextAt(rootPath, '.baton/local/metrics/' + todayLocal() + '.jsonl', JSON.stringify(rec) + '\n')
-            return { ok: true, task_type: type, recommended: r, fallback: [], note: 'micro 快速路径：主会话直接执行' }
-          }
           const preferred = []
           for (const tag of row.prefer || []) { const m = toModel(tag); if (m) preferred.push(m) }
           const fallback = []
           for (const tag of row.fallback || []) { const m = toModel(tag); if (m) fallback.push(m) }
-          const recommended = preferred[0] || null
-          rec.recommended = recommended
-          rec.fallback = fallback
-          await appendTextAt(rootPath, '.baton/local/metrics/' + todayLocal() + '.jsonl', JSON.stringify(rec) + '\n')
-          if (recommended === null) {
-            return { ok: true, task_type: type, recommended: null, fallback, note: '模型池无 verified 模型：按 SKILL 完成真实 health/credential/dispatch 验证并把 status 改为 verified 后才能分派；禁止使用未验证模型、禁止硬编码兜底' }
+          const routeModelIds = new Set(preferred.concat(fallback).map((m) => m.model))
+          const allEvents = await metricEventRows(rootPath, 30)
+          const cutoff = Date.now() - 30 * 86400000
+          const terminalByAttempt = new Map()
+          for (const e of allEvents) {
+            if (e.type !== 'attempt_evaluated' || typeof e.attempt_id !== 'string' || e.attempt_id === '') continue
+            const terminalShape = JSON.stringify({ task_id: e.task_id, task_type: e.task_type, host_id: e.host_id, actual_model: e.actual_model, source: e.source, result: e.result, total_tokens: e.total_tokens, duration_ms: e.duration_ms, validation_source: e.validation_source })
+            const prior = terminalByAttempt.get(e.attempt_id)
+            if (prior !== undefined && prior.shape !== terminalShape) return { ok: false, reason: 'attempt_id ' + e.attempt_id + ' 存在冲突终态：拒绝用不一致历史做路由' }
+            if (prior === undefined) terminalByAttempt.set(e.attempt_id, { shape: terminalShape, event: e })
           }
-          return { ok: true, task_type: type, recommended, fallback, note: '主会话按 recommended 用 subagent 分派；实际模型由可信宿主记录，无法确认时记 unknown' }
+          const samples = [...terminalByAttempt.values()].map((x) => x.event).filter((e) => e.host_id === 'dsh' && e.task_type === type && e.source === 'host_descriptor' && routeModelIds.has(e.actual_model) && Number.isFinite(Date.parse(e.ended_at || e.ts)) && Date.parse(e.ended_at || e.ts) >= cutoff && ['succeeded', 'needs_revision', 'failed'].indexOf(e.result) !== -1)
+          const byModel = new Map()
+          for (const e of samples) {
+            if (typeof e.actual_model !== 'string' || !pool.some((m) => m.id === e.actual_model && m.status === 'verified')) continue
+            if (!byModel.has(e.actual_model)) byModel.set(e.actual_model, [])
+            byModel.get(e.actual_model).push(e)
+          }
+          const ranked = []
+          for (const [model, list] of byModel.entries()) {
+            if (list.length < 5) continue
+            const quality = list.reduce((n, e) => n + (e.result === 'succeeded' ? 1 : (e.result === 'needs_revision' ? 0.5 : 0)), 0) / list.length
+            const tokenRows = list.filter((e) => Number.isSafeInteger(e.total_tokens))
+            const durationRows = list.filter((e) => Number.isSafeInteger(e.duration_ms))
+            ranked.push({ model, samples: list.length, quality, avg_tokens: tokenRows.length === 0 ? null : tokenRows.reduce((n, e) => n + e.total_tokens, 0) / tokenRows.length, avg_duration_ms: durationRows.length === 0 ? null : durationRows.reduce((n, e) => n + e.duration_ms, 0) / durationRows.length })
+          }
+          ranked.sort((a, b) => {
+            if (Math.abs(a.quality - b.quality) > 0.05) return b.quality - a.quality
+            if (a.avg_tokens !== null && b.avg_tokens !== null && a.avg_tokens !== b.avg_tokens) return a.avg_tokens - b.avg_tokens
+            if (a.avg_duration_ms !== null && b.avg_duration_ms !== null && a.avg_duration_ms !== b.avg_duration_ms) return a.avg_duration_ms - b.avg_duration_ms
+            return b.samples - a.samples
+          })
+          let recommended
+          let adaptive = false
+          if (row.mode === 'main-session') recommended = { mode: 'main-session', note: '主会话直接执行，不派代理' }
+          else if (ranked.length > 0) {
+            const m = pool.find((x) => x.id === ranked[0].model)
+            recommended = { provider: m.provider || 'deepseek', model: m.id, reasoning: row.reasoning || 'high' }
+            adaptive = true
+          } else recommended = { mode: 'host-default', note: '最近 30 天同宿主同任务类型可信样本不足 5 次，不自适应' }
+          let gitHead = ''
+          try { gitHead = (await gitSnapshot(rootPath)).head } catch (e) { gitHead = '' }
+          const sess = currentSession()
+          const sessionId = sess && sess.id !== undefined ? String(sess.id) : 'unknown'
+          const routeKey = taskId + '|dsh|' + sessionId + '|' + type + '|' + gitHead
+          const reusable = allEvents.slice().reverse().find((e) => e.type === 'route_decided' && e.route_key === routeKey && !allEvents.some((x) => x.type === 'attempt_started' && x.route_id === e.route_id))
+          if (reusable !== undefined) return { ok: true, task_id: taskId, task_type: type, route_id: reusable.route_id, recommended: reusable.recommended, fallback: reusable.fallback || [], sample_count: reusable.sample_count || 0, adaptive: reusable.adaptive === true, event_reused: true }
+          const seq = allEvents.filter((e) => e.type === 'route_decided' && e.route_key === routeKey).length + 1
+          const routeId = stableMetricId('route', routeKey + '|' + seq)
+          const rec = { ts: nowIso(), event_id: routeId, type: 'route_decided', route_id: routeId, route_key: routeKey, task_id: taskId, task_type: type, host_id: 'dsh', session_id: sessionId, head: gitHead, window_days: 30, sample_count: samples.length, adaptive, recommended, fallback, ranking: ranked }
+          const appended = await appendMetricEventOnce(rootPath, rec)
+          if (!appended.ok) return { ok: false, reason: 'route_decided event_id 冲突：拒绝覆盖已有事件' }
+          return { ok: true, task_id: taskId, task_type: type, route_id: routeId, recommended, fallback, sample_count: samples.length, adaptive, note: adaptive ? '已使用最近 30 天同宿主同任务类型可信样本路由' : recommended.note }
         }, false)
       },
     }))
 
     ctx.tools.register(defineTool({
       name: 'baton_record_actual',
-      description: 'Baton：记录任务实际执行模型到 Metrics 与证据。source 如实标注：requested=主会话分派记录；host_descriptor=宿主子代理身份事件（仅 continuable 含模型，一次性子代理模型宿主侧隐藏）；unknown=无法确认。',
-      parameters: simple({ path: '项目根目录', task_id: '任务 ID', actual_model: '实际模型（分派记录）', run_id: '子代理会话 ID（可选，尝试查宿主 descriptor）', source: 'requested | host_descriptor | unknown（可选，默认 requested）' }),
+      description: 'Baton：记录执行 attempt_started / attempt_evaluated 事件并兼容旧 actual 证据。终态仅 succeeded|needs_revision|failed|cancelled，缺失 Token/耗时保持 null。',
+      parameters: simple({ path: '项目根目录', task_id: '任务 ID', actual_model: '实际模型（分派记录）', run_id: '子代理会话 ID（可选，尝试查宿主 descriptor）', source: 'requested | host_descriptor | unknown（可选，默认 requested）', phase: 'started | evaluated（可选；留空兼容旧 actual）', route_id: 'started 必填：baton_route 返回的 route_id', attempt_id: 'evaluated 必填：started 返回的 attempt_id', result: 'evaluated 必填：succeeded | needs_revision | failed | cancelled', total_tokens: '可选非负整数；未知留空', duration_ms: '可选非负整数；未知留空', validation_source: '可选验证来源；未知留空' }),
       output: output(),
       async execute(args) {
         const rootPath = await rootOf(args)
         const taskId = (args.task_id || '').trim()
         if (taskId === '') return { ok: false, reason: '缺少 task_id' }
         if (!/^[A-Za-z0-9_\-]{1,64}$/.test(taskId)) return { ok: false, reason: 'task_id 只允许字母/数字/下划线/连字符（1-64 位）' }
-        // B-01：record_actual 纳入 operation envelope——同任务+run+模型+来源 重试幂等短路
-        const raOpId = 'actual:' + taskId + ':' + (args.run_id || '').trim() + ':' + (args.actual_model || 'unknown').trim().slice(0, 40) + ':' + (args.source || 'requested').trim()
+        // B-01：record_actual 纳入 operation envelope——同任务+run+模型+来源+HEAD 重试幂等短路；
+        // amend/rebase/reset 改写 HEAD 后必须允许重新绑定，不能被旧 SHA 的 done 记录永久短路。
+        let raHead = ''
+        try { raHead = (await gitSnapshot(rootPath)).head } catch (e) { raHead = '' }
+        const lifecyclePhase = String(args.phase || '').trim()
+        if (lifecyclePhase !== '' && ['started', 'evaluated'].indexOf(lifecyclePhase) === -1) return { ok: false, reason: 'phase 只允许 started|evaluated 或留空' }
+        const raOpId = 'actual:' + taskId + ':' + lifecyclePhase + ':' + String(args.route_id || '').trim() + ':' + String(args.attempt_id || '').trim() + ':' + String(args.result || '').trim() + ':' + (args.run_id || '').trim() + ':' + (args.actual_model || 'unknown').trim().slice(0, 40) + ':' + (args.source || 'requested').trim() + ':' + raHead
         return opEnvelope(rootPath, raOpId, async () => {
           const ownGate = await ownershipGuard(rootPath)
           if (!ownGate.pass) return { ok: false, reason: '未持有单写入者锁：' + ownGate.reason }
@@ -2600,7 +3079,8 @@ export function apply(ctx) {
         let source = (args.source || 'requested').trim()
         if (['requested', 'host_descriptor', 'unknown'].indexOf(source) === -1) source = 'requested'
         // 所有进入 evidence/metrics 的调用者字段统一凭据扫描（模型名/run_id/来源等）
-        const secHitRa = secretHits([actualModel, runId, source].filter((x) => typeof x === 'string').join('\n'))
+        const validationSource = String(args.validation_source || '').trim()
+        const secHitRa = secretHits([actualModel, runId, source, validationSource].filter((x) => typeof x === 'string').join('\n'))
         if (secHitRa.length > 0) {
           return { ok: false, reason: '参数疑似含敏感信息（' + secHitRa.join('、') + '）：拒绝写入证据（凭据绝不进入 Git 跟踪文档）', secret_hits: secHitRa }
         }
@@ -2637,24 +3117,73 @@ export function apply(ctx) {
         // source SHA 绑定：证据必须绑定记录时刻的仓库 HEAD，accept 校验其为当前 HEAD 祖先
         let evHead = ''
         try { evHead = (await gitSnapshot(rootPath)).head } catch (e) { evHead = '' }
+        let lifecycle = null
+        if (lifecyclePhase !== '') {
+          const allEvents = await metricEventRows(rootPath, 31)
+          if (lifecyclePhase === 'started') {
+            const routeId = String(args.route_id || '').trim()
+            const route = allEvents.find((e) => e.type === 'route_decided' && e.route_id === routeId && e.task_id === taskId)
+            if (route === undefined) return { ok: false, reason: 'attempt_started 必须引用当前任务已存在的 route_id' }
+            const runKey = runId || agentId || sessionId || 'unknown'
+            const openAttempt = allEvents.slice().reverse().find((e) => e.type === 'attempt_started' && e.route_id === routeId && e.run_key === runKey && !allEvents.some((x) => x.type === 'attempt_evaluated' && x.attempt_id === e.attempt_id))
+            if (openAttempt !== undefined) return { ok: true, task_id: taskId, route_id: routeId, attempt_id: openAttempt.attempt_id, event_reused: true, status: 'started' }
+            const seq = allEvents.filter((e) => e.type === 'attempt_started' && e.route_id === routeId && e.run_key === runKey).length + 1
+            const attemptId = stableMetricId('attempt', routeId + '|' + runKey + '|' + seq)
+            const event = { ts: nowIso(), started_at: nowIso(), event_id: attemptId + '-start', type: 'attempt_started', route_id: routeId, attempt_id: attemptId, run_key: runKey, run_id: runId || null, task_id: taskId, task_type: route.task_type, host_id: route.host_id || 'dsh', session_id: sessionId, agent_id: agentId, actual_model: actualModel, provider, source, head: evHead }
+            const add = await appendMetricEventOnce(rootPath, event)
+            if (!add.ok) return { ok: false, reason: 'attempt_started event_id 冲突：拒绝覆盖已有事件' }
+            return { ok: true, task_id: taskId, route_id: routeId, attempt_id: attemptId, status: 'started', event_reused: add.appended !== true }
+          }
+          const attemptId = String(args.attempt_id || '').trim()
+          const started = allEvents.find((e) => e.type === 'attempt_started' && e.attempt_id === attemptId && e.task_id === taskId)
+          if (started === undefined) return { ok: false, reason: 'attempt_evaluated 必须引用当前任务已存在的 attempt_id' }
+          const startedRunId = typeof started.run_id === 'string' ? started.run_id : ''
+          if (runId !== startedRunId) return { ok: false, reason: 'attempt_evaluated 的 run_id 必须与 attempt_started 精确一致，禁止借用另一执行会话结算' }
+          if (source !== 'host_descriptor') {
+            actualModel = started.actual_model || 'unknown'
+            provider = started.provider || null
+            source = started.source || 'unknown'
+          }
+          const result = String(args.result || '').trim()
+          if (['succeeded', 'needs_revision', 'failed', 'cancelled'].indexOf(result) === -1) return { ok: false, reason: 'result 只允许 succeeded|needs_revision|failed|cancelled' }
+          const tokens = parseNullableCount(args.total_tokens, 'total_tokens')
+          if (!tokens.ok) return { ok: false, reason: tokens.reason }
+          const duration = parseNullableCount(args.duration_ms, 'duration_ms')
+          if (!duration.ok) return { ok: false, reason: duration.reason }
+          const existingEval = allEvents.find((e) => e.type === 'attempt_evaluated' && e.attempt_id === attemptId)
+          const candidate = { type: 'attempt_evaluated', attempt_id: attemptId, route_id: started.route_id, task_id: taskId, task_type: started.task_type, host_id: started.host_id || 'dsh', session_id: sessionId, agent_id: agentId, run_id: runId || started.run_id || null, actual_model: actualModel, provider, source, result, total_tokens: tokens.value, duration_ms: duration.value, validation_source: validationSource || null, head: evHead }
+          if (existingEval !== undefined) {
+            const terminalInput = (e) => JSON.stringify({ result: e.result, total_tokens: e.total_tokens, duration_ms: e.duration_ms, validation_source: e.validation_source || null })
+            if (terminalInput(existingEval) !== terminalInput(candidate)) return { ok: false, reason: 'attempt_id 已有不同终态或评价指标：拒绝覆盖' }
+            lifecycle = { attempt_id: attemptId, result, event_reused: true }
+          } else {
+            const event = Object.assign({ ts: nowIso(), ended_at: nowIso(), event_id: attemptId + '-eval' }, candidate)
+            const add = await appendMetricEventOnce(rootPath, event)
+            if (!add.ok) return { ok: false, reason: 'attempt_evaluated event_id 冲突：拒绝覆盖已有事件' }
+            lifecycle = { attempt_id: attemptId, result, event_reused: add.appended !== true }
+          }
+        }
         // exactly-once effect key——多处 append 之间崩溃后重试不再重复追加；
-        // 同一 ekey（任务|run|模型|来源）已存在于目标文件即跳过该次 append。
-        const ekey = taskId + '|' + (runId || '-') + '|' + actualModel + '|' + source
+        // 同一 ekey（任务|run|模型|来源|HEAD）已存在于目标文件即跳过该次 append；
+        // HEAD 改写后生成新 ekey，使 accept 提示的“重新记录”真正可恢复。
+        const ekey = taskId + '|' + (runId || '-') + '|' + actualModel + '|' + source + '|' + evHead
         const ekeyIn = async (rel) => {
           const t = (await readTextAt(rootPath, rel)) || ''
           return t.indexOf('"ekey":"' + ekey + '"') !== -1
         }
         const rec = { ts: nowIso(), type: 'actual', task_id: taskId, run_id: runId || null, agent_id: agentId, session_id: sessionId, actual_model: actualModel, provider, source, head: evHead, ekey }
         const line = JSON.stringify(rec) + '\n'
-        if (!(await ekeyIn('.baton/local/metrics/' + todayLocal() + '.jsonl'))) await appendTextAt(rootPath, '.baton/local/metrics/' + todayLocal() + '.jsonl', line)
+        // 生命周期评价本身已是唯一工作单元；不要再写一条 legacy actual 造成月报双计。
+        // 旧调用仍保留 actual 兼容，Git/本机证据索引则两种模式都写。
+        if (lifecycle === null && !(await ekeyIn('.baton/local/metrics/' + todayLocal() + '.jsonl'))) await appendTextAt(rootPath, '.baton/local/metrics/' + todayLocal() + '.jsonl', line)
         // 本机详细证据层（gitignore，可放日志/截图等大附件）
         if (!(await ekeyIn('.baton/evidence/' + taskId + '.jsonl'))) await appendTextAt(rootPath, '.baton/evidence/' + taskId + '.jsonl', JSON.stringify({ ts: nowIso(), type: 'actual', task_id: taskId, run_id: runId || null, agent_id: agentId, session_id: sessionId, actual_model: actualModel, provider, source, head: evHead, ekey }) + '\n')
         // Git 内最小可验证索引：新 clone 仅凭此文件判断 completed 证据；
         // 大附件缺失时 accept 必须如实降级为「附件不可用，需重新验证」，不得伪装成完整强证据。
         const evIndexLine = JSON.stringify({ ts: nowIso(), task_id: taskId, run_id: runId || null, agent_id: agentId, session_id: sessionId, actual_model: actualModel, provider, source, check: 'actual-model', result: 'recorded', head: evHead, ekey }) + '\n'
         if (!(await ekeyIn('docs/ai_memory/state/evidence.jsonl'))) await appendTextAt(rootPath, 'docs/ai_memory/state/evidence.jsonl', evIndexLine)
-        return { ok: true, task_id: taskId, actual_model: actualModel, provider, source, source_coerced: coerced, agent_id: agentId, session_id: sessionId, note: (coerced ? 'source 自报 host_descriptor 但无宿主事件证据，已降级 requested；' : '') + 'recommended 由 baton_route 记录，actual 由本工具记录；已写入 Git 内 state/evidence.jsonl（跨机可见）与本机 .baton/evidence（详细层）；只有 host_descriptor（宿主身份事件）才计入月报模型排行，requested 仅作声明展示，禁止模型自报' }
-        })
+        return { ok: true, task_id: taskId, actual_model: actualModel, provider, source, source_coerced: coerced, agent_id: agentId, session_id: sessionId, attempt_id: lifecycle === null ? null : lifecycle.attempt_id, result: lifecycle === null ? null : lifecycle.result, event_reused: lifecycle === null ? null : (lifecycle.event_reused || false), note: (coerced ? 'source 自报 host_descriptor 但无宿主事件证据，已降级 requested；' : '') + 'recommended 由 baton_route 记录，actual 由本工具记录；已写入 Git 内 state/evidence.jsonl（跨机可见）与本机 .baton/evidence（详细层）；只有 host_descriptor（宿主身份事件）才计入月报模型排行，requested 仅作声明展示，禁止模型自报' }
+        }, false)
       },
     }))
 
@@ -2717,7 +3246,7 @@ export function apply(ctx) {
             + (args.alternatives ? '- 替代方案：' + args.alternatives + '\n' : '')
             + (args.verification ? '- 验证：' + args.verification + '\n' : '')
             + (args.boundary ? '- 边界：' + args.boundary + '\n' : '')
-          await appendRevision(rootPath, file, '记录 ' + (kind === 'decision' ? '技术决策' : '坑点经验') + '：' + title)
+          await appendRevision(rootPath, file, '记录 ' + (kind === 'decision' ? '技术决策' : '坑点经验') + '：' + title, agentLabel(args))
           await appendTextAt(rootPath, file, '\n## ' + id + '｜' + title + '\n- 日期：' + today + '\n- 内容：' + content + '\n' + extra + (args.task_id ? '- 关联任务：' + args.task_id + '\n' : ''))
           // line_start 修正：追加与修订行完成后按条目实际行号定位，避免偏一行
           const after = (await readTextAt(rootPath, file)) || ''
@@ -2738,27 +3267,27 @@ export function apply(ctx) {
       },
     }))
 
-    function inlineTemplates(name) {
+    function inlineTemplates(name, initAgent) {
       return {
-        'docs/ai_memory/index.md': '# ' + name + ' AI 记忆索引\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n- 分卷规则：单文件超过 3MB 时按完整条目或章节分卷，主文件保留当前有效内容、摘要和读取顺序；分卷只生成清单，用户确认后再归档。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立记忆索引。 |\n\n更新时间：' + todayLocal() + '\n\n## 开工必读\n\n按顺序读取：\n\n1. `current.md`（当前工作摘要）\n2. `handoff_current.md` 末条（最近交接事实）\n3. `tasks/task_progress.md`（进行中任务）\n4. `tasks/task_todo.md`（待办）\n5. `overview.md`（项目总览）\n6. 当前任务关联的需求、协议、原型或文档\n\n## 当前主线\n\n- 当前任务：（无）\n- 当前阶段：（未开始）\n- 唯一下一步：说「上班啦」开始工作\n\n## 权威入口\n\n- 项目总览与需求清单：`overview.md`\n- 编码与开发红线：`constraints.md`\n- 用户口令：`commands.md`\n- 交接审计：`handoff_current.md`\n- 验证矩阵：`validation_matrix.md`\n- 任务：`tasks/`\n- 技术决策：`knowledge/tech_decision.md`\n- 坑点经验：`knowledge/pit_experience.md`\n- 设计规范：`ui_spec/`\n- 需求基线：`requirements/`\n- 日报：`daily_log/`\n- 历史索引（机器层）：`state/archive_index.json`\n\n## 未来新文档命名规则\n\n- `current.md`、`handoff_current.md`、`index.md`、`commands.md` 与 `state/` 下结构化文件保持固定名称。\n- 新任务/计划/决策/坑点文档有稳定 ID 时以 ID 开头，再接简短主题和类型，例如 `DC-YYYYMMDD-NNN_<topic>_plan.md`；日报使用 `daily_YYYY-MM-DD.md`。\n- 既有历史文件保留原名，不为统一外观批量改名；合法迁移必须保持稳定 ID，并同步引用与 `archive_index.json`。\n',
-        'docs/ai_memory/current.md': '# 当前工作\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立当前工作摘要。 |\n\n## 当前事实（简写，随生命周期更新）\n\n- 当前项目、分支和状态只读取下方托管投影；Git HEAD 在生命周期安全节点实时读取，本文件不保存会自我过期的 HEAD 字符串。\n- 当前基础设施工作：（无）\n- 当前真实阻断：（无）\n- 业务主线 `DC-YYYYMMDD-NNN`：（未开始；详细背景见其计划及 `handoff_current.md`）\n- 只有确需历史时才查询 `state/archive_index.json`，随后读取命中的文件片段；普通任务禁止扫描全部历史。\n\n<!-- BATON:CANONICAL-PROJECTION:BEGIN -->\n- Task: NONE\n- Phase: idle\n- Next step: NONE\n- Branch: NONE\n- HEAD: LIVE-READ\n<!-- BATON:CANONICAL-PROJECTION:END -->\n',
-        'docs/ai_memory/commands.md': '# Baton 用户口令\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立口令说明。 |\n\n用户只需要自然描述任务，以及以下口令。Git、文档、记忆与收尾的机械步骤由 Baton 自动完成。\n\n## `上班啦`\n\n自动核对并 fetch Git（ff-only）、恢复未完成任务、读取交接与待办、生成任务表。推荐项为 ID 1，用户只回复 `1` 即可继续。\n\n## `下班啦`\n\n完整收尾：验证 → 更新文档（日报/交接/current/索引）→ 结算当日 Metrics → commit → push → 远端 SHA 核验 → 释放 ownership。未做远端 SHA 核验不得报「下班完成」。\n\n## `继续工作`（别名 `接手继续`）\n\n跨会话/跨电脑恢复上下文：从 Git、canonical state、交接的唯一下一步继续，不需要复述整个项目。\n\n## `更新项目文档`\n\n中途存档：把当前进度增量写入日报/current/handoff 检查点后停止，不 commit/push。\n\n## `保存设计规范`\n\n只保存用户已确认、可复用的设计事实，按全局/组件/页面/工作流分类写入 `ui_spec/`，并核对归属路径。\n\n## `完成`\n\n关闭当前任务、记录完成证据、给下一步（不等于下班）。\n\n## `记入记忆`\n\n把决策/坑点/问题写入 `knowledge/` 并自动建索引。\n\n## `记录需求变更`\n\n新增/修改/移除需求时，同步更新 `overview.md` 需求清单并追加一行变更记录。\n\n## `Baton init`\n\n初始化项目实例：生成文档骨架、配置与三端薄适配器（AGENTS.md / CLAUDE.md / .cursorrules）。\n\n## 普通自然语言任务\n\n需要选择时统一输出：\n\n| ID | 任务/下一步 | 说明 | 建议 | 确认口令 |\n| --- | --- | --- | --- | --- |\n| 1 | 推荐事项 | 当前状态与影响 | 推荐 | 回复 `1` |\n\n用户无需执行 PowerShell、Git、hash 或 approval 命令。\n',
-        'docs/ai_memory/handoff_current.md': '# 交接记录\n\n## 【归档分卷索引】\n\n- 当前文件约 0.5KB，未达到 3MB 分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立交接记录。 |\n\n## 交接条目模板（追加到文件末尾，保持最新在末）\n\n```markdown\n### HO-YYYYMMDD-HHMM-<Agent>｜<From> → <To>\n- 时间：YYYY-MM-DD HH:MM\n- 交接状态：<状态>\n- 任务 ID / 状态：\n- 分支 / HEAD：\n- 实际修改文件：\n- 已完成 / 尚未完成：\n- 已验证（命令 → 结果）：\n- 未验证项及原因：\n- 唯一下一步：\n- 阻塞与风险：\n- 凭据检查：未记录敏感信息\n```\n',
-        'docs/ai_memory/overview.md': '# ' + name + ' 项目总览（Baton 权威项目卷）\n\n> 本文件是项目的"记性本"：目标、需求、技术栈、功能点都记在这里。\n> **铁律**：新增/修改/移除需求时，必须同步更新「需求清单」并在「变更记录」追加一行；历史只追加，不覆盖。\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立项目总览。 |\n\n## 一句话定义\n\n（待填：这个项目做什么，一句话）\n\n## 项目目标\n\n- 项目名：' + name + '\n- 为什么做这个项目：（待填）\n- 成功标准：（待填）\n\n## 需求清单\n\n| 编号 | 需求 | 状态 | 说明 |\n|---|---|---|---|\n| RQ-001 | （待填） | 规划中 | （待填） |\n\n> 状态：规划中 / 进行中 / 已实现 / 已移除（移除见变更记录）\n\n## 技术栈\n\n- 语言/框架：（待填）\n- 关键依赖：（待填）\n- 运行环境：（待填）\n\n## 功能点\n\n- （待填，按模块列出）\n\n## 架构概要\n\n- （待填：模块职责、进程边界、数据流；改变冻结点须经确认并记录）\n\n## 变更记录\n\n| 日期 | 变更内容 | 类型 | 原因/备注 |\n|---|---|---|---|\n| ' + todayLocal() + ' | 创建项目总览 | 新建 | Baton init |\n',
-        'docs/ai_memory/constraints.md': '# 编码与开发红线（冻结点）\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立红线清单。 |\n\n## 硬性红线\n\n除非任务明确授权，任何执行者不得静默改变：\n\n- 顶层模块职责与进程边界\n- 协议/接口/状态机\n- 隐私与凭据红线\n- 依赖版本与发布方式\n\n## 处理流程\n\n发现必须改变冻结点时：停止相关改动 → 生成检查点 → 退回架构负责人/用户确认，确认后在此追加一行变更记录。\n\n## 文档约束\n\n- 所有长期 md 文件必须保留【归档分卷索引】与【修订记录】两个区块；缺失时先补齐再写入。\n- 单文件超过 3MB 时按完整条目或章节分卷，主文件保留当前有效内容、摘要和读取顺序。\n- 事实优先级：Git/真实文件/新鲜验证 > state/*.json > 交接/日报 > 聊天自述。\n- 历史只增不改；危险 Git（force push/reset --hard/危险 clean/未授权 rebase）禁止。\n',
-        'docs/ai_memory/validation_matrix.md': '# 验证矩阵\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立验证矩阵。 |\n\n按本次修改范围选择必要验证；构建成功不等于业务闭环。按风险选验证，禁止每个任务跑整个测试宇宙。\n\n| 范围 | 最低验证 | 高风险补充 |\n| --- | --- | --- |\n| 文档/元数据 | 文件存在性与引用一致性、`git status --short` | 交接与状态投影一致性 |\n| 工具/脚本 | 语法检查、单测 | 真实路径冒烟、错误分支注入、无凭据残留 |\n| 服务/后端 | 构建、单测 | 真实数据库联调、契约测试、失败事务注入、回滚演练 |\n| 前端 | 构建、lint、单测 | 真实 API 联调、关键路径浏览器验证 |\n| 协议/契约 | lint、schema 校验 | 前后端/客户端兼容与破坏性变更检查 |\n| 发布 | 构建制品摘要、备份、回滚、健康检查 | 恢复演练、权限/限流/TLS/防火墙/日志/告警 |\n\n| 变更级别 | 验证强度 |\n|---|---|\n| Micro | 最小必要验证 |\n| Bounded | 针对性验证 |\n| Complex | 完整关键路径 |\n| Architecture / High-risk | 端到端 + 独立复核 + Fidelity |\n',
-        'docs/ai_memory/tasks/task_schema.md': '# 任务状态与字段规范\n\n## 【归档分卷索引】\n\n- 当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立任务规范。 |\n\n## 任务 ID\n\n格式：`DC-YYYYMMDD-NNN`\n\n- 日期使用任务首次进入知识库的日期。\n- `NNN` 从 `001` 起，确保仓库内唯一。\n- 旧任务在下一次启动、变更、阻塞或验收时补发 ID；不批量改写历史。\n\n## 状态机\n\n```text\n待规划 → 可开始 → 进行中 → 阻塞\n                    ↓\n                  待验收 → 已完成\n\n任意未完成状态 → 已取消\n阻塞解除 → 可开始或进行中\n```\n\n## Definition of Ready（进入"可开始"前必须明确）\n\n- 目标\n- 范围内与范围外\n- 优先级\n- 风险\n- 负责人\n- 验收标准\n- 验证计划\n- 回滚点\n\n## Definition of Done\n\n- 每条验收标准有证据（命令 → 结果）\n- diff 与范围一致\n- 验证通过\n- 无意外文件与凭据残留\n- 文档已更新（修订记录 + 归档分卷索引）\n- 独立复核通过（按风险分级）\n\n代码写完 ≠ 完成；测试全绿 ≠ 完成；必须逐条对照验收标准。\n',
-        'docs/ai_memory/tasks/task_todo.md': '# 待办清单\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立待办清单。 |\n\n## 待办表\n\n| 优先级 | 任务 ID | 事项 | 状态 | 完成条件 |\n| --- | --- | --- | --- | --- |\n| P0 | DC-YYYYMMDD-001 | （首项待办，由用户确认后创建） | 待规划 | （完成标准，须可验证） |\n\n> 状态：待规划 / 可开始 / 进行中 / 阻塞 / 待验收 / 已完成 / 已取消\n> 规则：任务状态变化时，在上方【修订记录】追加一行（日期/修改人/变更概要），并同步 `state/tasks.json` 与 `state/archive_index.json`。\n',
-        'docs/ai_memory/tasks/task_progress.md': '# 进行中任务\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立进行中任务视图。 |\n\n## 进行中表\n\n| 优先级 | 任务 ID | 事项 | 状态 | 当前进度 | 唯一下一步 |\n| --- | --- | --- | --- | --- | --- |\n| P0 | DC-YYYYMMDD-001 | （首个任务） | 待规划 | （未开始） | 说「上班啦」开始 |\n\n> 规则：任务状态变化时，在上方【修订记录】追加一行，并同步 `state/tasks.json` 与 `state/archive_index.json`。\n',
-        'docs/ai_memory/tasks/task_finished.md': '# 已完成任务\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立完成任务视图。 |\n\n## 已完成条目（示例格式）\n\n```markdown\n## DC-YYYYMMDD-NNN｜<简短主题>\n\n- 完成日期：YYYY-MM-DD\n- 用户验收：通过 / 未验收\n- 结果：（做了什么、交付了什么）\n- 证据：（命令 → 结果，可验证）\n- 边界：（没有动什么）\n- 关联：（相关文档路径）\n```\n\n> 规则：任务完成时，把条目从 `task_progress.md` / `task_todo.md` 移到这里，在上方【修订记录】追加一行，并同步 `state/tasks.json` 与 `state/archive_index.json`。\n',
-        'docs/ai_memory/knowledge/tech_decision.md': '# 技术决策记录（ADR）\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立技术决策记录。 |\n\n## 决策条目模板（每条追加一个 `TD-YYYYMMDD-NNN`）\n\n```markdown\n## TD-YYYYMMDD-NNN｜<决策标题>\n\n- 状态：有效 / 已被 TD-YYYYMMDD-NNN 取代 / 已废弃\n- 适用模块/版本：\n- 最后验证日期：\n- 最后验证提交：`<sha>`（如适用）\n- 决策：（做了什么决定、为什么）\n- 替代方案：（考虑过但未选）\n- 取舍：（代价与收益）\n- 验证：（如何证明有效，命令 → 结果）\n- 边界：（没有覆盖什么）\n```\n\n> 规则：新决策追加到文件末尾；状态被取代时只改状态行并写明取代关系，不删除历史条目；同步 `state/archive_index.json`。\n',
-        'docs/ai_memory/knowledge/pit_experience.md': '# 已验证坑点与解决方案\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立坑点经验记录。 |\n\n## 坑点条目模板（每条追加一个）\n\n```markdown\n## <坑点标题>\n\n- 状态：有效 / 已解决\n- 适用模块/版本：\n- 最后验证日期：\n- 最后验证提交：`<sha>`（如适用）\n- 现象：（发生了什么）\n- 根因：（为什么）\n- 稳定方案：（怎么修、以后怎么做）\n- 自测边界：（怎么证明修好了，命令 → 结果；只看表面现象不算）\n```\n\n> 规则：新坑点追加到文件末尾；只记录**已验证**的坑点（有命令/证据），猜测性坑点不得写入；同步 `state/archive_index.json`。\n',
-        'docs/ai_memory/ui_spec/global.md': '# 全局设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立全局设计规范。 |\n\n## 保存设计规范的口令行为\n\n- 只保存**用户已确认、可复用**的设计事实（颜色、字体、间距、组件行为、页面结构、工作流），不保存推断。\n- 按分类写入：全局 → `ui_spec/global.md`；组件 → `ui_spec/component.md`；页面 → `ui_spec/page.md`；工作流 → `ui_spec/workflow.md`。\n- 冲突时保留历史、标注当前有效版本，并追加【修订记录】一行。\n- 同步 `state/archive_index.json`。\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累）\n',
-        'docs/ai_memory/ui_spec/component.md': '# 组件设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立组件设计规范。 |\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累；冲突保留历史、标注当前有效版本）\n',
-        'docs/ai_memory/ui_spec/page.md': '# 页面设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立页面设计规范。 |\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累；冲突保留历史、标注当前有效版本）\n',
-        'docs/ai_memory/ui_spec/workflow.md': '# 工作流设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立工作流设计规范。 |\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累；冲突保留历史、标注当前有效版本）\n',
-        'docs/ai_memory/requirements/requirements_YYYY-MM-DD_TEMPLATE.md': '# <需求主题> 需求基线\n\n> 任务：DC-YYYYMMDD-NNN\n> 状态：（待确认 / 已确认 / 已实现 / 已取代）\n> 确认日期：\n> 产品负责人：用户\n> 执行者：（当前执行 AI）\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | Baton | Baton init 建立需求基线模板。 |\n\n## 文档状态\n\n- 关联任务：`DC-YYYYMMDD-NNN`\n- 状态：\n- 确认日期：\n- 取代范围：（本需求取代了哪些旧需求/文档）\n- 保留范围：（继续继承哪些既有原则/文档）\n\n## 1. 产品定位\n\n（待填：做什么、给谁用、不做什么）\n\n## 2. 问题陈述\n\n（待填：现在有什么问题，为什么要做）\n\n## 3. 需求清单\n\n| 编号 | 需求 | 优先级 | 状态 | 验收标准 |\n| --- | --- | --- | --- | --- |\n| RQ-001 | （待填） | P0 | 待确认 | （可验证） |\n\n## 4. 边界与约束\n\n- （待填：范围内/范围外、依赖、限制）\n\n> 规则：需求变更时在【修订记录】追加一行，并同步 `overview.md` 需求清单与 `state/archive_index.json`；文件按 `requirements_YYYY-MM-DD_<topic>.md` 命名。\n',
-        'docs/ai_memory/daily_log/daily_TEMPLATE.md': '# YYYY-MM-DD 日报\n\n> 本文件是当日工作流水：交接条目/进度条目按时间追加，最新在末。\n> 文件名 `daily_YYYY-MM-DD.md`；每天一份，不跨天合并。\n\n## 今日条目\n\n（暂无。`更新项目文档` / `下班啦` / `完成` 会自动在此追加当日条目）\n\n## 条目格式示例\n\n```markdown\n## HO-YYYYMMDD-HHMM-<Agent>｜<简短主题>\n\n- 时间：YYYY-MM-DD HH:MM\n- 任务：`DC-YYYYMMDD-NNN`\n- 完成：（做了什么）\n- 验证：（命令 → 结果）\n- 未验证项及原因：\n- 唯一下一步：\n- 凭据检查：未记录敏感信息\n```\n',
+        'docs/ai_memory/index.md': '# ' + name + ' AI 记忆索引\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n- 分卷规则：单文件超过 3MB 时按完整条目或章节分卷，主文件保留当前有效内容、摘要和读取顺序；分卷只生成清单，用户确认后再归档。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立记忆索引。 |\n\n更新时间：' + todayLocal() + '\n\n## 开工必读\n\n按顺序读取：\n\n1. `current.md`（当前工作摘要）\n2. `handoff_current.md` 末条（最近交接事实）\n3. `tasks/task_progress.md`（进行中任务）\n4. `tasks/task_todo.md`（待办）\n5. `overview.md`（项目总览）\n6. 当前任务关联的需求、协议、原型或文档\n\n## 当前主线\n\n- 当前任务：（无）\n- 当前阶段：（未开始）\n- 唯一下一步：说「上班啦」开始工作\n\n## 权威入口\n\n- 项目总览与需求清单：`overview.md`\n- 编码与开发红线：`constraints.md`\n- 用户口令：`commands.md`\n- 交接审计：`handoff_current.md`\n- 验证矩阵：`validation_matrix.md`\n- 任务：`tasks/`\n- 技术决策：`knowledge/tech_decision.md`\n- 坑点经验：`knowledge/pit_experience.md`\n- 设计规范：`ui_spec/`\n- 需求基线：`requirements/`\n- 日报：`daily_log/`\n- 历史索引（机器层）：`state/archive_index.json`\n\n## 未来新文档命名规则\n\n- `current.md`、`handoff_current.md`、`index.md`、`commands.md` 与 `state/` 下结构化文件保持固定名称。\n- 新任务/计划/决策/坑点文档有稳定 ID 时以 ID 开头，再接简短主题和类型，例如 `DC-YYYYMMDD-NNN_<topic>_plan.md`；日报使用 `daily_YYYY-MM-DD.md`。\n- 既有历史文件保留原名，不为统一外观批量改名；合法迁移必须保持稳定 ID，并同步引用与 `archive_index.json`。\n',
+        'docs/ai_memory/current.md': '# 当前工作\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立当前工作摘要。 |\n\n> 修订表规则：只保留最近 3 个日期、每个日期一行；同日再次更新覆盖当日行，不向下堆叠。\n\n## 当前事实（简写，随生命周期更新）\n\n- 当前项目、分支和状态只读取下方托管投影；Git HEAD 在生命周期安全节点实时读取，本文件不保存会自我过期的 HEAD 字符串。\n- 当前基础设施工作：（无）\n- 当前真实阻断：（无）\n- 业务主线 `DC-YYYYMMDD-NNN`：（未开始；详细背景见其计划及 `handoff_current.md`）\n- 只有确需历史时才查询 `state/archive_index.json`，随后读取命中的文件片段；普通任务禁止扫描全部历史。\n\n<!-- BATON:CANONICAL-PROJECTION:BEGIN -->\n- Task: NONE\n- Phase: idle\n- Next step: NONE\n- Branch: NONE\n- HEAD: LIVE-READ\n<!-- BATON:CANONICAL-PROJECTION:END -->\n',
+        'docs/ai_memory/commands.md': '# Baton 用户口令\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立口令说明。 |\n\n用户只需要自然描述任务，以及以下口令。Git、文档、记忆与收尾的机械步骤由 Baton 自动完成。\n\n## `上班啦`\n\n自动核对并 fetch Git（ff-only）、恢复未完成任务、读取交接与待办、生成任务表。推荐项为 ID 1，用户只回复 `1` 即可继续。\n\n## `下班啦`\n\n完整收尾：验证 → 更新文档（日报/交接/current/索引）→ 结算当日 Metrics → commit → push → 远端 SHA 核验 → 释放 ownership。未做远端 SHA 核验不得报「下班完成」。\n\n## `继续工作`（别名 `接手继续`）\n\n跨会话/跨电脑恢复上下文：从 Git、canonical state、交接的唯一下一步继续，不需要复述整个项目。\n\n## `更新项目文档`\n\n中途存档：把当前进度增量写入日报/current/handoff 检查点后停止，不 commit/push。\n\n## `保存设计规范`\n\n只保存用户已确认、可复用的设计事实，按全局/组件/页面/工作流分类写入 `ui_spec/`，并核对归属路径。\n\n## `完成`\n\n关闭当前任务、记录完成证据、给下一步（不等于下班）。\n\n## `记入记忆`\n\n把决策/坑点/问题写入 `knowledge/` 并自动建索引。\n\n## `记录需求变更`\n\n新增/修改/移除需求时，同步更新 `overview.md` 需求清单并追加一行变更记录。\n\n## `Baton init`\n\n初始化项目实例：生成文档骨架、配置与三端薄适配器（AGENTS.md / CLAUDE.md / .cursorrules / .cursor/rules/baton.mdc）。\n\n## 普通自然语言任务\n\n需要选择时统一输出：\n\n| ID | 任务/下一步 | 说明 | 建议 | 确认口令 |\n| --- | --- | --- | --- | --- |\n| 1 | 推荐事项 | 当前状态与影响 | 推荐 | 回复 `1` |\n\n用户无需执行 PowerShell、Git、hash 或 approval 命令。\n',
+        'docs/ai_memory/handoff_current.md': '# 交接记录\n\n## 【归档分卷索引】\n\n- 当前文件约 0.5KB，未达到 3MB 分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立交接记录。 |\n\n## 交接条目模板（追加到文件末尾，保持最新在末）\n\n```markdown\n### HO-YYYYMMDD-HHMM-<Agent>｜下班收尾｜<关键词>\n- 时间：YYYY-MM-DD HH:MM（东八区；Agent = Cursor / Codex / Claude / DeepSeek / workbuddy）\n- 交接状态：<状态>\n- 任务 ID / 状态：\n- 分支 / HEAD：\n- 实际修改文件：\n- 已完成 / 尚未完成：\n- 已验证（命令 → 结果）：\n- 未验证项及原因：\n- 唯一下一步：\n- 阻塞与风险：\n- 凭据检查：未记录敏感信息\n```\n',
+        'docs/ai_memory/overview.md': '# ' + name + ' 项目总览（Baton 权威项目卷）\n\n> 本文件是项目的"记性本"：目标、需求、技术栈、功能点都记在这里。\n> **铁律**：新增/修改/移除需求时，必须同步更新「需求清单」并在「变更记录」追加一行；历史只追加，不覆盖。\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立项目总览。 |\n\n## 一句话定义\n\n（待填：这个项目做什么，一句话）\n\n## 项目目标\n\n- 项目名：' + name + '\n- 为什么做这个项目：（待填）\n- 成功标准：（待填）\n\n## 需求清单\n\n| 编号 | 需求 | 状态 | 说明 |\n|---|---|---|---|\n| RQ-001 | （待填） | 规划中 | （待填） |\n\n> 状态：规划中 / 进行中 / 已实现 / 已移除（移除见变更记录）\n\n## 技术栈\n\n- 语言/框架：（待填）\n- 关键依赖：（待填）\n- 运行环境：（待填）\n\n## 功能点\n\n- （待填，按模块列出）\n\n## 架构概要\n\n- （待填：模块职责、进程边界、数据流；改变冻结点须经确认并记录）\n\n## 变更记录\n\n| 日期 | 变更内容 | 类型 | 原因/备注 |\n|---|---|---|---|\n| ' + todayLocal() + ' | 创建项目总览 | 新建 | Baton init |\n',
+        'docs/ai_memory/constraints.md': '# 编码与开发红线（冻结点）\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立红线清单。 |\n\n## 硬性红线\n\n除非任务明确授权，任何执行者不得静默改变：\n\n- 顶层模块职责与进程边界\n- 协议/接口/状态机\n- 隐私与凭据红线\n- 依赖版本与发布方式\n\n## 处理流程\n\n发现必须改变冻结点时：停止相关改动 → 生成检查点 → 退回架构负责人/用户确认，确认后在此追加一行变更记录。\n\n## 文档约束\n\n- 所有长期 md 文件必须保留【归档分卷索引】与【修订记录】两个区块；缺失时先补齐再写入。\n- 单文件超过 3MB 时按完整条目或章节分卷，主文件保留当前有效内容、摘要和读取顺序。\n- 事实优先级：Git/真实文件/新鲜验证 > state/*.json > 交接/日报 > 聊天自述。\n- 历史只增不改；危险 Git（force push/reset --hard/危险 clean/未授权 rebase）禁止。\n- 人读时间一律东八区 `YYYY-MM-DD HH:MM`；JSON/metrics 可用 ISO。\n- 修订记录「修改人」与交接 HO 执行者只允许：Cursor / Codex / Claude / DeepSeek / workbuddy；识别不出写「未知」；禁止写 Baton。\n- 标题与修订概要必须含关键词；禁止空标题「中途存档」「下班收尾」「更新当前工作摘要」。\n- `current.md` 修订表只保留最近 3 个日期、每个日期一行（同日覆盖不堆叠）；任务防丢失靠 task_todo.md / task_progress.md / state/tasks.json。\n',
+        'docs/ai_memory/validation_matrix.md': '# 验证矩阵\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立验证矩阵。 |\n\n按本次修改范围选择必要验证；构建成功不等于业务闭环。按风险选验证，禁止每个任务跑整个测试宇宙。\n\n| 范围 | 最低验证 | 高风险补充 |\n| --- | --- | --- |\n| 文档/元数据 | 文件存在性与引用一致性、`git status --short` | 交接与状态投影一致性 |\n| 工具/脚本 | 语法检查、单测 | 真实路径冒烟、错误分支注入、无凭据残留 |\n| 服务/后端 | 构建、单测 | 真实数据库联调、契约测试、失败事务注入、回滚演练 |\n| 前端 | 构建、lint、单测 | 真实 API 联调、关键路径浏览器验证 |\n| 协议/契约 | lint、schema 校验 | 前后端/客户端兼容与破坏性变更检查 |\n| 发布 | 构建制品摘要、备份、回滚、健康检查 | 恢复演练、权限/限流/TLS/防火墙/日志/告警 |\n\n| 变更级别 | 验证强度 |\n|---|---|\n| Micro | 最小必要验证 |\n| Bounded | 针对性验证 |\n| Complex | 完整关键路径 |\n| Architecture / High-risk | 端到端 + 独立复核 + Fidelity |\n',
+        'docs/ai_memory/tasks/task_schema.md': '# 任务状态与字段规范\n\n## 【归档分卷索引】\n\n- 当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立任务规范。 |\n\n## 任务 ID\n\n格式：`DC-YYYYMMDD-NNN`\n\n- 日期使用任务首次进入知识库的日期。\n- `NNN` 从 `001` 起，确保仓库内唯一。\n- 旧任务在下一次启动、变更、阻塞或验收时补发 ID；不批量改写历史。\n\n## 状态机\n\n```text\n待规划 → 可开始 → 进行中 → 阻塞\n                    ↓\n                  待验收 → 已完成\n\n任意未完成状态 → 已取消\n阻塞解除 → 可开始或进行中\n```\n\n## Definition of Ready（进入"可开始"前必须明确）\n\n- 目标\n- 范围内与范围外\n- 优先级\n- 风险\n- 负责人\n- 验收标准\n- 验证计划\n- 回滚点\n\n## Definition of Done\n\n- 每条验收标准有证据（命令 → 结果）\n- diff 与范围一致\n- 验证通过\n- 无意外文件与凭据残留\n- 文档已更新（修订记录 + 归档分卷索引）\n- 独立复核通过（按风险分级）\n\n代码写完 ≠ 完成；测试全绿 ≠ 完成；必须逐条对照验收标准。\n',
+        'docs/ai_memory/tasks/task_todo.md': '# 待办清单\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立待办清单。 |\n\n## 待办表\n\n| 优先级 | 任务 ID | 事项 | 状态 | 完成条件 |\n| --- | --- | --- | --- | --- |\n| P0 | DC-YYYYMMDD-001 | （首项待办，由用户确认后创建） | 待规划 | （完成标准，须可验证） |\n\n> 状态：待规划 / 可开始 / 进行中 / 阻塞 / 待验收 / 已完成 / 已取消\n> 规则：任务状态变化时，在上方【修订记录】追加一行（日期/修改人/变更概要），并同步 `state/tasks.json` 与 `state/archive_index.json`。\n',
+        'docs/ai_memory/tasks/task_progress.md': '# 进行中任务\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立进行中任务视图。 |\n\n## 进行中表\n\n| 优先级 | 任务 ID | 事项 | 状态 | 当前进度 | 唯一下一步 |\n| --- | --- | --- | --- | --- | --- |\n| P0 | DC-YYYYMMDD-001 | （首个任务） | 待规划 | （未开始） | 说「上班啦」开始 |\n\n> 规则：任务状态变化时，在上方【修订记录】追加一行，并同步 `state/tasks.json` 与 `state/archive_index.json`。\n',
+        'docs/ai_memory/tasks/task_finished.md': '# 已完成任务\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立完成任务视图。 |\n\n## 已完成条目（示例格式）\n\n```markdown\n## DC-YYYYMMDD-NNN｜<简短主题>\n\n- 完成日期：YYYY-MM-DD\n- 用户验收：通过 / 未验收\n- 结果：（做了什么、交付了什么）\n- 证据：（命令 → 结果，可验证）\n- 边界：（没有动什么）\n- 关联：（相关文档路径）\n```\n\n> 规则：任务完成时，把条目从 `task_progress.md` / `task_todo.md` 移到这里，在上方【修订记录】追加一行，并同步 `state/tasks.json` 与 `state/archive_index.json`。\n',
+        'docs/ai_memory/knowledge/tech_decision.md': '# 技术决策记录（ADR）\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立技术决策记录。 |\n\n## 决策条目模板（每条追加一个 `TD-YYYYMMDD-NNN`）\n\n```markdown\n## TD-YYYYMMDD-NNN｜<决策标题>\n\n- 状态：有效 / 已被 TD-YYYYMMDD-NNN 取代 / 已废弃\n- 适用模块/版本：\n- 最后验证日期：\n- 最后验证提交：`<sha>`（如适用）\n- 决策：（做了什么决定、为什么）\n- 替代方案：（考虑过但未选）\n- 取舍：（代价与收益）\n- 验证：（如何证明有效，命令 → 结果）\n- 边界：（没有覆盖什么）\n```\n\n> 规则：新决策追加到文件末尾；状态被取代时只改状态行并写明取代关系，不删除历史条目；同步 `state/archive_index.json`。\n',
+        'docs/ai_memory/knowledge/pit_experience.md': '# 已验证坑点与解决方案\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立坑点经验记录。 |\n\n## 坑点条目模板（每条追加一个）\n\n```markdown\n## <坑点标题>\n\n- 状态：有效 / 已解决\n- 适用模块/版本：\n- 最后验证日期：\n- 最后验证提交：`<sha>`（如适用）\n- 现象：（发生了什么）\n- 根因：（为什么）\n- 稳定方案：（怎么修、以后怎么做）\n- 自测边界：（怎么证明修好了，命令 → 结果；只看表面现象不算）\n```\n\n> 规则：新坑点追加到文件末尾；只记录**已验证**的坑点（有命令/证据），猜测性坑点不得写入；同步 `state/archive_index.json`。\n',
+        'docs/ai_memory/ui_spec/global.md': '# 全局设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立全局设计规范。 |\n\n## 保存设计规范的口令行为\n\n- 只保存**用户已确认、可复用**的设计事实（颜色、字体、间距、组件行为、页面结构、工作流），不保存推断。\n- 按分类写入：全局 → `ui_spec/global.md`；组件 → `ui_spec/component.md`；页面 → `ui_spec/page.md`；工作流 → `ui_spec/workflow.md`。\n- 冲突时保留历史、标注当前有效版本，并追加【修订记录】一行。\n- 同步 `state/archive_index.json`。\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累）\n',
+        'docs/ai_memory/ui_spec/component.md': '# 组件设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立组件设计规范。 |\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累；冲突保留历史、标注当前有效版本）\n',
+        'docs/ai_memory/ui_spec/page.md': '# 页面设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立页面设计规范。 |\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累；冲突保留历史、标注当前有效版本）\n',
+        'docs/ai_memory/ui_spec/workflow.md': '# 工作流设计规范\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立工作流设计规范。 |\n\n## 当前有效规范\n\n（暂无。保存设计规范后在此积累；冲突保留历史、标注当前有效版本）\n',
+        'docs/ai_memory/requirements/requirements_YYYY-MM-DD_TEMPLATE.md': '# <需求主题> 需求基线\n\n> 任务：DC-YYYYMMDD-NNN\n> 状态：（待确认 / 已确认 / 已实现 / 已取代）\n> 确认日期：\n> 产品负责人：用户\n> 执行者：（当前执行 AI）\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立需求基线模板。 |\n\n## 文档状态\n\n- 关联任务：`DC-YYYYMMDD-NNN`\n- 状态：\n- 确认日期：\n- 取代范围：（本需求取代了哪些旧需求/文档）\n- 保留范围：（继续继承哪些既有原则/文档）\n\n## 1. 产品定位\n\n（待填：做什么、给谁用、不做什么）\n\n## 2. 问题陈述\n\n（待填：现在有什么问题，为什么要做）\n\n## 3. 需求清单\n\n| 编号 | 需求 | 优先级 | 状态 | 验收标准 |\n| --- | --- | --- | --- | --- |\n| RQ-001 | （待填） | P0 | 待确认 | （可验证） |\n\n## 4. 边界与约束\n\n- （待填：范围内/范围外、依赖、限制）\n\n> 规则：需求变更时在【修订记录】追加一行，并同步 `overview.md` 需求清单与 `state/archive_index.json`；文件按 `requirements_YYYY-MM-DD_<topic>.md` 命名。\n',
+        'docs/ai_memory/daily_log/daily_TEMPLATE.md': '# YYYY-MM-DD 日报\n\n> 本文件是当日工作流水：交接条目/进度条目按时间追加，最新在末。\n> 文件名 `daily_YYYY-MM-DD.md`；每天一份，不跨天合并。\n\n## 今日条目\n\n（暂无。`更新项目文档` / `下班啦` / `完成` 会自动在此追加当日条目）\n\n## 条目格式示例\n\n```markdown\n## 下班收尾｜<关键词>｜YYYY-MM-DD HH:MM｜<Agent>\n\n- 时间：YYYY-MM-DD HH:MM（东八区；Agent = Cursor / Codex / Claude / DeepSeek / workbuddy）\n- 任务：`DC-YYYYMMDD-NNN`\n- 完成：（做了什么）\n- 验证：（命令 → 结果）\n- 未验证项及原因：\n- 唯一下一步：\n- 凭据检查：未记录敏感信息\n```\n',
         'docs/ai_memory/state/project_state.json': JSON.stringify({ schema_version: 1, revision: 1, updated_at: nowIso(), repository: { id: null, branch: null, dirty: false, remote_sha: null, last_published_sha: null }, current_task_id: null, active_work: null, ownership: { writer: null, logical_state: 'released', updated_at: nowIso() }, last_handoff: null }, null, 2),
         'docs/ai_memory/state/tasks.json': JSON.stringify({ schema_version: 1, revision: 1, updated_at: nowIso(), tasks: [] }, null, 2),
         'docs/ai_memory/state/archive_index.json': JSON.stringify({ schema_version: 1, revision: 1, updated_at: nowIso(), entries: [] }, null, 2),
@@ -2787,123 +3316,120 @@ export function apply(ctx) {
       }
     }
 
-    async function monthlyHtml(rootPath, monthDir, month, today, git, actualModel, reviewerModel) {
-      const raw = (await readTextAt(rootPath, monthDir + '/runs.jsonl')) || ''
+    async function monthlyHtml(rootPath, monthDir, month, today, git, actualModel, reviewerModel, rawOverride) {
+      const raw = typeof rawOverride === 'string' ? rawOverride : ((await readTextAt(rootPath, monthDir + '/runs.jsonl')) || '')
       const runs = []
+      let badLines = 0
       for (const line of raw.split('\n')) {
         const s = line.trim()
         if (s === '') continue
         try {
           const r = JSON.parse(s)
-          // 只统计执行类记录（task_complete/clock_out/actual）；routing 是决策记录不进执行统计
-          if (r && typeof r.ts === 'string' && r.type !== 'routing') runs.push(r)
-        } catch (e) { /* 跳过坏行 */ }
+          if (r && typeof r.ts === 'string') runs.push(r)
+        } catch (e) { badLines += 1 }
       }
-      // 去重成「工作单元」：task_complete/actual 按 task_id 合并为一个单元，clock_out 每条一个单元。
-      // 失败/返修/耗时当前记录体系未采集 → 如实显示「未记录」，禁止虚构 100%/0ms（假成功红线）。
-      // 完成语义：只有存在 task_complete 记录的任务才计入「完成任务」；actual 记录合入其任务单元；
-      // 无 task_complete 的 actual 记录单独列为「已记录」单元（不计完成、不虚构成功）。
-      // 模型可信度：只有 source=host_descriptor（真实宿主身份事件证据）的 actual 记录才把具体模型计入排行榜；
-      // requested（主会话声明）与自报字符串（task_complete/clock_out 里代理自己填的 actual_model）只显示在明细行并标「声明/自报」，不污染模型排行。
-      const TRUSTED_SOURCE = (s) => s === 'host_descriptor'
-      const completedTasks = new Map()
-      const closeUnits = []
-      const actualOnly = []
+      const trustedSource = (s) => ['host_descriptor', 'host_reported', 'dispatch_confirmed', 'host_default'].indexOf(s) !== -1
+      const completed = new Map()
+      const actual = []
+      const attempts = []
+      const startedAttempts = new Map()
+      const evaluatedAttempts = new Set()
+      const lifecycleTaskIds = new Set()
+      let clockOuts = 0
       for (const r of runs) {
-        if (r.type === 'clock_out') { closeUnits.push(r); continue }
-        if (r.type === 'task_complete') {
-          if (r.task_id) completedTasks.set(r.task_id, { task_id: r.task_id, actual_model: r.actual_model || 'unknown', trusted: false, ts: r.ts, reviewer_model: r.reviewer_model || null })
+        if (r.type === 'clock_out') { clockOuts += 1; continue }
+        if (r.type === 'routing' || r.type === 'route_decided') continue
+        if (r.type === 'attempt_started' && r.attempt_id) {
+          if (!startedAttempts.has(r.attempt_id)) startedAttempts.set(r.attempt_id, r)
+          if (r.task_id) lifecycleTaskIds.add(r.task_id)
           continue
         }
-        actualOnly.push(r)
-      }
-      const recordedUnits = []
-      for (const r of actualOnly) {
-        const trusted = TRUSTED_SOURCE(r.source)
-        if (r.task_id && completedTasks.has(r.task_id)) {
-          const u = completedTasks.get(r.task_id)
-          if (trusted && r.actual_model && r.actual_model !== 'unknown') { u.actual_model = r.actual_model; u.trusted = true }
-          if (r.reviewer_model && !u.reviewer_model) u.reviewer_model = r.reviewer_model
-          if (r.ts > u.ts) u.ts = r.ts
-        } else {
-          recordedUnits.push({ task_id: r.task_id || null, actual_model: r.actual_model || 'unknown', trusted, ts: r.ts, reviewer_model: r.reviewer_model || null, recordedOnly: true })
+        if (r.type === 'task_complete' && r.task_id) {
+          completed.set(r.task_id, { task_id: r.task_id, ts: r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'succeeded', token: null, duration_ms: null })
+        } else if (r.type === 'actual') {
+          actual.push(r)
+        } else if (r.type === 'attempt_evaluated') {
+          if (r.attempt_id && evaluatedAttempts.has(r.attempt_id)) continue
+          if (r.attempt_id) evaluatedAttempts.add(r.attempt_id)
+          if (r.task_id) lifecycleTaskIds.add(r.task_id)
+          attempts.push({ task_id: r.task_id || null, ts: r.ended_at || r.ts, actual_model: r.actual_model || r.model || 'unknown', reasoning_effort: r.actual_reasoning_effort || r.reasoning_effort || null, source: r.actual_source || r.source || 'unknown', role: r.role || 'executor', result: r.result || r.status || 'unknown', token: Number.isFinite(r.total_tokens) ? r.total_tokens : (Number.isFinite(r.tokens) ? r.tokens : null), duration_ms: Number.isFinite(r.duration_ms) ? r.duration_ms : null })
         }
       }
-      const units = [...completedTasks.values()].concat(closeUnits.map((r) => ({ task_id: null, actual_model: r.actual_model || 'unknown', trusted: false, ts: r.ts, reviewer_model: r.reviewer_model || null, role: 'closeout' }))).concat(recordedUnits)
-      const modelStats = {}
-      const hours = Array.from({ length: 24 }, (_, i) => ({ hour: i, units: 0 }))
-      const dates = new Set()
-      const agents = []
-      const dayCounts = {}
-      let unknownCount = 0
-      for (const u of units) {
+      for (const [attemptId, r] of startedAttempts.entries()) {
+        if (!evaluatedAttempts.has(attemptId)) attempts.push({ task_id: r.task_id || null, ts: r.started_at || r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'unarchived', token: null, duration_ms: null })
+      }
+      const recordedOnly = []
+      for (const r of actual) {
+        if (r.task_id && lifecycleTaskIds.has(r.task_id)) continue
+        if (r.task_id && completed.has(r.task_id)) {
+          const u = completed.get(r.task_id)
+          if (trustedSource(r.source) && r.actual_model && r.actual_model !== 'unknown') {
+            u.actual_model = r.actual_model
+            u.reasoning_effort = r.reasoning_effort || null
+            u.source = r.source
+          }
+        } else {
+          recordedOnly.push({ task_id: r.task_id || null, ts: r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'unarchived', token: null, duration_ms: null })
+        }
+      }
+      const legacyCompleted = [...completed.values()].filter((u) => !lifecycleTaskIds.has(u.task_id))
+      const units = legacyCompleted.concat(attempts, recordedOnly).map((u) => {
         const d = new Date(u.ts)
-        // §46：按宿主本地时区归属工作日，禁止用 UTC（跨天会写错日期）
-        const day = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
-        dates.add(day)
-        dayCounts[day] = (dayCounts[day] || 0) + 1
-        if (hours[d.getHours()]) hours[d.getHours()].units += 1
-        const m = u.actual_model || 'unknown'
-        const trusted = u.trusted === true
-        // §26 + 可信过滤：unknown 与自报模型不参与具体模型排行，单独统计不污染
-        if (m === 'unknown' || !trusted) {
-          unknownCount += 1
-        } else {
-          const st = modelStats[m] || (modelStats[m] = { model: m, units: 0 })
-          st.units += 1
-        }
-        agents.push({
-          role: u.role === 'closeout' ? 'closeout' : (u.recordedOnly ? 'recorded' : 'executor'),
-          actual_model: m + (m !== 'unknown' && !trusted ? '（自报）' : ''),
-          reviewer: u.reviewer_model || 'n/a',
-          task: u.task_id || 'n/a',
-          result: u.role === 'closeout' ? '收尾' : (u.recordedOnly ? '已记录' : '完成'),
-        })
-      }
-      const total = units.length
-      const tasksCompleted = completedTasks.size
-      const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))
-      const na = '<td class="muted">—</td>'
-      const dayRows = [...dates].sort().reverse().map((day) => {
-        const n = dayCounts[day] || 0
-        return '<tr><td>' + esc(day) + '</td><td>' + n + '</td>' + na + na + na + '</tr>'
-      }).join('')
-      const hourRows = hours.map((h) => h.units > 0 ? '<tr><td>' + String(h.hour).padStart(2, '0') + ':00</td><td>' + h.units + '</td></tr>' : '').join('')
-      let modelRows = Object.values(modelStats).sort((a, b) => b.units - a.units).map((m) =>
-        '<tr><td>' + esc(m.model) + '</td><td>' + m.units + '</td>' + na + na + na + '</tr>').join('')
-      if (unknownCount > 0) {
-        // unknown / 自报 / 声明 单列一行，标注不参与模型排行
-        modelRows += '<tr><td>unknown / 自报 / 声明（未证实）</td><td>' + unknownCount + '</td>' + na + na + na + '</tr>'
-      }
-      const agentRows = agents.slice(-20).reverse().map((a) =>
-        '<tr><td>' + esc(a.role) + '</td><td>' + esc(a.actual_model) + '</td><td>' + esc(a.reviewer) + '</td><td>' + esc(a.task) + '</td><td>' + esc(a.result) + '</td></tr>').join('')
+        const validDate = !Number.isNaN(d.getTime())
+        const east8 = validDate ? east8Stamp(d) : null
+        const day = east8 !== null ? east8.date : 'unknown'
+        const trusted = trustedSource(u.source) && u.actual_model !== 'unknown'
+        const model = trusted ? u.actual_model + (u.reasoning_effort ? ' / ' + u.reasoning_effort : '') : 'unknown / 声明（未证实）'
+        return { task: u.task_id || 'n/a', ts: u.ts, day, hour: east8 !== null ? Number(east8.hm.slice(0, 2)) : null, model, trusted, role: u.role || 'executor', result: u.result || 'unknown', token: u.token, duration_ms: u.duration_ms }
+      })
+      const dates = [...new Set(units.map((u) => u.day).filter((d) => d !== 'unknown'))].sort()
+      const monthPrefix = month.replace('/', '-')
+      const defaultDate = today.indexOf(monthPrefix) === 0 ? today : (dates.length > 0 ? dates[dates.length - 1] : monthPrefix + '-01')
+      const allDates = [...new Set(dates.concat([defaultDate]))].sort()
+      const days = {}
+      for (const d of allDates) days[d] = units.filter((u) => u.day === d)
+      const knownResults = units.filter((u) => ['succeeded', 'needs_revision', 'failed', 'cancelled'].indexOf(u.result) !== -1)
       const data = {
         month,
-        dates: [...dates].sort(),
-        monthSummary: { records: runs.length, work_units: total, tasks_completed: tasksCompleted, clock_outs: closeUnits.length, rework: null, failed: null, blocked: null, total_ms: null },
-        days: {},
+        defaultDate,
+        dates: allDates,
+        bad_lines: badLines,
+        monthSummary: {
+          records: runs.length,
+          work_units: units.length,
+          tasks_completed: units.filter((u) => u.result === 'succeeded').length,
+          clock_outs: clockOuts,
+          rework: knownResults.length > 0 ? units.filter((u) => u.result === 'needs_revision').length : null,
+          failed: knownResults.length > 0 ? units.filter((u) => u.result === 'failed').length : null,
+          blocked: null,
+          total_ms: units.some((u) => u.duration_ms !== null) ? units.reduce((n, u) => n + (u.duration_ms || 0), 0) : null,
+        },
+        days,
         orchestration: { provider_status: [], routing_modes: ['baton-static'], buckets: [], attempts: [] },
       }
+      const esc = (s) => String(s).replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[c]))
+      const safeJson = JSON.stringify(data).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')
+      const options = allDates.map((d) => '<option value="' + esc(d) + '"' + (d === defaultDate ? ' selected' : '') + '>' + esc(d) + '</option>').join('')
+      const hourTargets = Array.from({ length: 24 }, (_, h) => '<rect class="hour-hit" data-hour="' + h + '" x="' + (48 + h * 37) + '" y="18" width="37" height="218" fill="transparent"/>').join('')
+      const boardNames = ['综合推荐榜', '首次通过率榜', '低返修榜', '稳定性榜', 'Token 效率榜', '速度榜']
+      const boards = boardNames.map((n, i) => '<section class="rank"><h3>' + n + '</h3><div id="rank' + i + '" class="muted">未记录</div></section>').join('')
       return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Baton Metrics</title><style>' +
-        'body{font-family:Segoe UI,sans-serif;background:#0c1422;color:#e8eef8;margin:0;padding:24px}' +
-        '.top{display:flex;justify-content:space-between;align-items:end;max-width:1200px;margin:auto}' +
-        '.muted{color:#8ea4bf;font-size:12px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;max-width:1200px;margin:20px auto}' +
-        '.card{background:#122035;border:1px solid #29405d;border-radius:12px;padding:14px}' +
-        '.value{font-size:24px}.panel{background:#122035;border:1px solid #29405d;border-radius:12px;padding:14px;max-width:1200px;margin:14px auto}' +
-        'table{width:100%;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid #29405d;text-align:left}' +
-        'h2{font-size:14px;color:#8ea4bf;margin:4px 0 10px}' +
-        '@media(max-width:760px){.cards{grid-template-columns:repeat(2,1fr)}}' +
-        '</style></head><body><div class="top"><div><div class="muted">BATON / MONTHLY METRICS</div><h1>执行模型统计</h1><div class="muted">' + esc(month) + ' ｜ 分支 ' + esc(git.branch) + '</div></div></div>' +
-        '<section class="cards">' +
-        '<article class="card"><div class="muted">工作单元</div><div class="value">' + total + '</div></article>' +
-        '<article class="card"><div class="muted">完成任务</div><div class="value">' + tasksCompleted + '</div></article>' +
-        '<article class="card"><div class="muted">返修</div><div class="value">—<span class="muted">（未记录）</span></div></article>' +
-        '<article class="card"><div class="muted">失败</div><div class="value">—<span class="muted">（未记录）</span></div></article>' +
-        '</section>' +
-        '<section class="panel"><h2>按日明细</h2><table><tr><th>日期</th><th>工作单元</th><th>一次完成</th><th>返修</th><th>失败</th></tr>' + (dayRows || '<tr><td colspan="5" class="muted">暂无数据</td></tr>') + '</table></section>' +
-        '<section class="panel"><h2>小时分布</h2><table><tr><th>小时</th><th>工作单元</th></tr>' + (hourRows || '<tr><td colspan="2" class="muted">暂无数据</td></tr>') + '</table></section>' +
-        '<section class="panel"><h2>模型排行</h2><table><tr><th>模型</th><th>次数</th><th>一次完成率</th><th>返修</th><th>失败</th></tr>' + (modelRows || '<tr><td colspan="5" class="muted">暂无数据</td></tr>') + '</table></section>' +
-        '<section class="panel"><h2>代理明细</h2><table><tr><th>角色</th><th>实际模型</th><th>复核</th><th>任务</th><th>结果</th></tr>' + (agentRows || '<tr><td colspan="5" class="muted">暂无数据</td></tr>') + '</table></section>' +
-        '<script>window.__METRICS__=' + JSON.stringify(data) + ';</script></body></html>'
+        'body{font-family:Segoe UI,sans-serif;background:#0c1422;color:#e8eef8;margin:0;padding:24px}.wrap{max-width:1200px;margin:auto}' +
+        '.top,.filters{display:flex;justify-content:space-between;align-items:end;gap:16px}.filters{justify-content:flex-start;align-items:center;flex-wrap:wrap}' +
+        '.muted{color:#8ea4bf;font-size:12px}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:20px 0}' +
+        '.card,.panel,.rank{background:#122035;border:1px solid #29405d;border-radius:12px;padding:14px}.value{font-size:24px}' +
+        '.panel{margin:14px 0}.chart-wrap{position:relative;overflow-x:auto}svg{width:100%;min-width:930px;height:280px}.axis{stroke:#29405d}.trend{fill:none;stroke-width:2.5}' +
+        '#chartTooltip{position:absolute;display:none;pointer-events:none;white-space:pre;background:#08101d;border:1px solid #52749b;border-radius:8px;padding:8px;font-size:12px}' +
+        '.ranks{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.rank h3,h2{font-size:14px;color:#9fb5cf;margin:4px 0 10px}' +
+        'table{width:100%;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid #29405d;text-align:left}select{background:#122035;color:#e8eef8;border:1px solid #52749b;padding:6px}' +
+        '@media(max-width:760px){.cards{grid-template-columns:repeat(2,1fr)}.ranks{grid-template-columns:1fr}}' +
+        '</style></head><body data-default-date="' + esc(defaultDate) + '"><main class="wrap"><div class="top"><div><div class="muted">BATON / MONTHLY METRICS</div><h1>执行效果月报</h1><div class="muted">' + esc(month) + ' ｜ 分支 ' + esc(git.branch) + '</div></div></div>' +
+        '<section class="filters"><label>日期 <select id="dateSelect">' + options + '</select></label><label><input id="includeMain" type="checkbox"> 包含主会话</label><label><input id="mergeReasoning" type="checkbox"> 合并同模型推理档位</label><span id="dataWarning" class="muted"></span></section>' +
+        '<section class="cards"><article class="card"><div class="muted">执行尝试</div><div id="attempts" class="value">0</div></article><article class="card"><div class="muted">成功</div><div id="success" class="value">未记录</div></article><article class="card"><div class="muted">返修</div><div id="revision" class="value">未记录</div></article><article class="card"><div class="muted">失败</div><div id="failure" class="value">未记录</div></article><article class="card"><div class="muted">Token</div><div id="tokens" class="value">未记录</div></article></section>' +
+        '<section class="panel"><h2>0–23 小时模型使用趋势</h2><div class="chart-wrap"><svg id="hourlyChart" viewBox="0 0 960 270" role="img" aria-label="按小时模型使用次数折线图"><g id="axes"></g><g id="lines"></g>' + hourTargets + '</svg><div id="chartTooltip"></div></div><div id="legend" class="muted"></div></section>' +
+        '<section class="panel"><h2>榜单</h2><div class="ranks">' + boards + '</div></section>' +
+        '<section class="panel"><h2>所选日期执行明细</h2><div id="details"></div></section></main>' +
+        '<script>window.__METRICS__=' + safeJson + ';</script>\n' +
+        '<script>(function(){var D=window.__METRICS__,S=document.getElementById("dateSelect"),M=document.getElementById("includeMain"),G=document.getElementById("mergeReasoning"),svg=document.getElementById("hourlyChart"),tip=document.getElementById("chartTooltip"),colors=["#55c2ff","#ffb454","#79d98c","#c099ff","#ff718b","#d9d46c"];function val(v){return v===null||v===undefined?"未记录":String(v)}function html(v){var d=document.createElement("div");d.textContent=String(v);return d.innerHTML}function rows(){return(D.days[S.value]||[]).filter(function(u){return M.checked||u.role!=="main"}).map(function(u){var x=Object.assign({},u);if(G.checked)x.model=x.model.replace(/ \/ (low|medium|high|max)$/," ");return x})}function groups(rs){var o={};rs.forEach(function(u){(o[u.model]||(o[u.model]=[])).push(u)});return o}function set(id,v){document.getElementById(id).textContent=val(v)}function render(){var rs=rows(),known=rs.filter(function(u){return["succeeded","needs_revision","failed","cancelled"].indexOf(u.result)!==-1});set("attempts",rs.length);set("success",known.length?known.filter(function(u){return u.result==="succeeded"}).length:null);set("revision",known.length?known.filter(function(u){return u.result==="needs_revision"}).length:null);set("failure",known.length?known.filter(function(u){return u.result==="failed"}).length:null);var tk=rs.filter(function(u){return u.token!==null});set("tokens",tk.length?tk.reduce(function(n,u){return n+u.token},0):null);var ax="",ln="",gs=groups(rs),max=1;Object.keys(gs).forEach(function(k){for(var h=0;h<24;h++)max=Math.max(max,gs[k].filter(function(u){return u.hour===h}).length)});for(var h=0;h<24;h++){var x=66+h*37;ax+="<line class=\"axis\" x1=\""+x+"\" y1=\"20\" x2=\""+x+"\" y2=\"230\"/><text x=\""+x+"\" y=\"252\" fill=\"#8ea4bf\" font-size=\"10\" text-anchor=\"middle\">"+h+"</text>"}Object.keys(gs).forEach(function(k,i){var pts=[];for(var h=0;h<24;h++){var n=gs[k].filter(function(u){return u.hour===h}).length;pts.push((66+h*37)+","+(230-n/max*190))}ln+="<polyline class=\"trend\" stroke=\""+colors[i%colors.length]+"\" points=\""+pts.join(" ")+"\"/>"});document.getElementById("axes").innerHTML=ax;document.getElementById("lines").innerHTML=ln;document.getElementById("legend").textContent=Object.keys(gs).join(" ｜ ")||"未记录";var trusted=rs.filter(function(u){return u.trusted}),stats=groups(trusted),arr=Object.keys(stats).map(function(k){var a=stats[k],q=a.filter(function(u){return["succeeded","needs_revision","failed"].indexOf(u.result)!==-1}),s=q.filter(function(u){return u.result==="succeeded"}),t=s.filter(function(u){return u.token!==null}),d=s.filter(function(u){return u.duration_ms!==null}).map(function(u){return u.duration_ms}).sort(function(a,b){return a-b});return{model:k,n:a.length,pass:q.length?s.length/q.length:null,rework:q.length?q.filter(function(u){return u.result==="needs_revision"}).length/q.length:null,fail:q.length?q.filter(function(u){return u.result==="failed"}).length/q.length:null,tok:t.length?t.reduce(function(n,u){return n+u.token},0)/t.length:null,speed:d.length?d[Math.floor(d.length/2)]:null}});function board(id,metric,asc){var a=arr.filter(function(x){return x[metric]!==null}).sort(function(x,y){return asc?x[metric]-y[metric]:y[metric]-x[metric]});document.getElementById(id).innerHTML=a.length?"<table><tr><th>配置</th><th>指标</th><th>使用次数</th></tr>"+a.map(function(x){return"<tr><td>"+html(x.model)+"</td><td>"+(metric==="pass"||metric==="rework"||metric==="fail"?Math.round(x[metric]*100)+"%":Math.round(x[metric]))+"</td><td>"+x.n+"</td></tr>"}).join("")+"</table>":"未记录（无可信且覆盖该指标的模型执行结果）"}board("rank0","pass",false);board("rank1","pass",false);board("rank2","rework",true);board("rank3","fail",true);board("rank4","tok",true);board("rank5","speed",true);document.getElementById("details").innerHTML=rs.length?"<table><tr><th>时间</th><th>模型/档位</th><th>结果</th><th>Token</th><th>耗时(ms)</th></tr>"+rs.map(function(u){return"<tr><td>"+html(u.ts)+"</td><td>"+html(u.model)+"</td><td>"+html(u.result)+"</td><td>"+html(val(u.token))+"</td><td>"+html(val(u.duration_ms))+"</td></tr>"}).join("")+"</table>":"<span class=\"muted\">当天无执行记录</span>";document.getElementById("dataWarning").textContent=D.bad_lines?"数据警告：跳过 "+D.bad_lines+" 行损坏 JSON":""}svg.addEventListener("mousemove",function(e){var t=e.target.closest(".hour-hit");if(!t)return;var h=Number(t.getAttribute("data-hour")),rs=rows().filter(function(u){return u.hour===h}),gs=groups(rs),out=[String(h).padStart(2,"0")+":00"];Object.keys(gs).forEach(function(k){var a=gs[k];out.push(k+"：使用 "+a.length+"，成功 "+a.filter(function(u){return u.result==="succeeded"}).length+"，返修 "+a.filter(function(u){return u.result==="needs_revision"}).length+"，失败 "+a.filter(function(u){return u.result==="failed"}).length+"，Token "+val(a.some(function(u){return u.token!==null})?a.reduce(function(n,u){return n+(u.token||0)},0):null)+"，耗时 "+val(a.some(function(u){return u.duration_ms!==null})?a.reduce(function(n,u){return n+(u.duration_ms||0)},0):null))});tip.textContent=out.join("\\n");tip.style.display="block";tip.style.left=(e.offsetX+12)+"px";tip.style.top=(e.offsetY+8)+"px"});svg.addEventListener("mouseleave",function(){tip.style.display="none"});S.addEventListener("change",render);M.addEventListener("change",render);G.addEventListener("change",render);render()})();</script></body></html>'
     }
 }

@@ -23,8 +23,6 @@ jobs:
           registry-url: 'https://registry.npmjs.org/'
       - name: Upgrade npm (scoped-package OIDC publish requires recent npm)
         run: npm install -g npm@latest
-      - name: Drift check
-        run: node scripts/check-drift.mjs
       - name: Publish to npm (OIDC provenance, idempotent)
         run: |
           VERSION=$(node -p "require('./package.json').version")

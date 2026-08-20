@@ -11,7 +11,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立项目总览。 |
+| {{DATE}} | Cursor | Baton init 建立项目总览。 |
 
 ## 一句话定义
 

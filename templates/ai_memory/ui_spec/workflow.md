@@ -8,7 +8,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立工作流设计规范。 |
+| {{DATE}} | Cursor | Baton init 建立工作流设计规范。 |
 
 ## 当前有效规范
 

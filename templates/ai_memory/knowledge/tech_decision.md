@@ -8,7 +8,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立技术决策记录。 |
+| {{DATE}} | Cursor | Baton init 建立技术决策记录。 |
 
 ## 决策条目模板（每条追加一个 `TD-YYYYMMDD-NNN`）
 

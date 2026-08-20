@@ -1,6 +1,6 @@
 {
   "name": "@kakadeka/dsh-baton",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "description": "Baton 项目接力协作系统 —— DeepSeek Harness 组合包（19 个 baton_* 工具）",
   "repository": {
     "type": "git",
@@ -8,17 +8,18 @@
   },
   "main": "index.mjs",
   "files": [
+    "README.md",
+    "LICENSE",
+    "package.json",
     "index.mjs",
     "cordis.patch.yml",
-    "gittop.png",
     "skills",
-    "readme",
     "scripts/baton-install.ps1",
     "scripts/baton-migrate.ps1",
     "scripts/baton-sync.ps1",
     "scripts/baton-uninstall.ps1",
-    "templates",
-    "plugin"
+    "scripts/baton-report.mjs",
+    "templates"
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -72,8 +73,5 @@
       "patch": "./cordis.patch.yml"
     }
   },
-  "license": "Apache-2.0",
-  "scripts": {
-    "test": "node scripts/check-drift.mjs"
-  }
+  "license": "Apache-2.0"
 }

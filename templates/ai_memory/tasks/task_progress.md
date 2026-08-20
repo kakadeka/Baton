@@ -8,7 +8,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立进行中任务视图。 |
+| {{DATE}} | Cursor | Baton init 建立进行中任务视图。 |
 
 ## 进行中表
 

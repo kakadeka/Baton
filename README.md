@@ -1,9 +1,5 @@
 # 🥁 Baton — Pass your project, not your context.
 
-<p align="center">
-  <img src="gittop.png" alt="Baton — Pass your project, not your context" width="100%">
-</p>
-
 <h2 align="center">Switch computers, switch AI, switch sessions — and keep working with one sentence.</h2>
 
 <p align="center">
@@ -20,22 +16,6 @@
   <img src="https://img.shields.io/badge/pwsh-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="pwsh">
   <img src="https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white" alt="DSH plugin">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="platform">
-</p>
-
-<p align="center">
-  English ·
-  <a href="./readme/README.zh.md">简体中文</a> ·
-  <a href="./readme/README.zh-TW.md">繁體中文</a> ·
-  <a href="./readme/README.ja.md">日本語</a> ·
-  <a href="./readme/README.ko.md">한국어</a> ·
-  <a href="./readme/README.fr.md">Français</a> ·
-  <a href="./readme/README.de.md">Deutsch</a> ·
-  <a href="./readme/README.es.md">Español</a> ·
-  <a href="./readme/README.pt.md">Português</a> ·
-  <a href="./readme/README.ru.md">Русский</a> ·
-  <a href="./readme/README.tr.md">Türkçe</a> ·
-  <a href="./readme/README.ar.md">العربية</a> ·
-  <a href="./readme/README.th.md">ไทย</a>
 </p>
 
 **Baton is a project-relay collaboration system.** It lets Claude Code, Codex, Cursor, and DeepSeek Harness take turns maintaining the **same project** across machines — progress, memory, design specs, tasks, and Git stay consistent. **You talk normally; it does the rest.**

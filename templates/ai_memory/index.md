@@ -9,7 +9,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立记忆索引。 |
+| {{DATE}} | Cursor | Baton init 建立记忆索引。 |
 
 更新时间：{{DATE}}
 

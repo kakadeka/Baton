@@ -10,9 +10,9 @@
 ## 条目格式示例
 
 ```markdown
-## HO-YYYYMMDD-HHMM-<Agent>｜<简短主题>
+## 下班收尾｜<关键词>｜YYYY-MM-DD HH:MM｜<Agent>
 
-- 时间：YYYY-MM-DD HH:MM
+- 时间：YYYY-MM-DD HH:MM（东八区；Agent = Cursor / Codex / Claude / DeepSeek / workbuddy）
 - 任务：`DC-YYYYMMDD-NNN`
 - 完成：（做了什么）
 - 验证：（命令 → 结果）

@@ -71,6 +71,24 @@ foreach ($f in @('AGENTS.md', 'CLAUDE.md', '.cursorrules')) {
   }
 }
 
+$mdcRel = '.cursor/rules/baton.mdc'
+$mdcPath = Join-Path $ProjectRoot '.cursor\rules\baton.mdc'
+if (Test-Path $mdcPath) {
+  $mdcInManifest = $false
+  if ($null -ne $manifest -and $null -ne $manifest.managed) {
+    try { $mdcInManifest = -not [string]::IsNullOrEmpty([string]$manifest.managed.($mdcRel)) } catch { $mdcInManifest = $false }
+  }
+  $mdcAllow = $false
+  if ($mdcInManifest) { $mdcAllow = Test-ManagedHash $mdcPath $mdcRel }
+  else {
+    try { $mdcAllow = ((Get-Content $mdcPath -Raw -Encoding UTF8) -match 'Baton 项目协作入口') } catch { $mdcAllow = $false }
+  }
+  if ($mdcAllow) {
+    if ($DryRun) { Step "  将删除 $mdcRel" }
+    else { Remove-Item $mdcPath -Force; $removed += $mdcRel }
+  }
+}
+
 Step "3/4 版本锚（.baton/version.json，hash 未变才删）"
 $verPath = Join-Path $ProjectRoot '.baton\version.json'
 if (Test-Path $verPath) {

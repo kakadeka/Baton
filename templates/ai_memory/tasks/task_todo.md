@@ -8,7 +8,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立待办清单。 |
+| {{DATE}} | Cursor | Baton init 建立待办清单。 |
 
 ## 待办表
 

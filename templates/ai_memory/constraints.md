@@ -8,7 +8,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立红线清单。 |
+| {{DATE}} | Cursor | Baton init 建立红线清单。 |
 
 ## 硬性红线
 
@@ -29,3 +29,7 @@
 - 单文件超过 3MB 时按完整条目或章节分卷，主文件保留当前有效内容、摘要和读取顺序。
 - 事实优先级：Git/真实文件/新鲜验证 > state/*.json > 交接/日报 > 聊天自述。
 - 历史只增不改；危险 Git（force push/reset --hard/危险 clean/未授权 rebase）禁止。
+- 人读时间一律东八区 `YYYY-MM-DD HH:MM`；JSON/metrics 可用 ISO。
+- 修订记录「修改人」与交接 HO 执行者只允许：Cursor / Codex / Claude / DeepSeek / workbuddy；识别不出写「未知」；禁止写 Baton。
+- 标题与修订概要必须含关键词；禁止空标题「中途存档」「下班收尾」「更新当前工作摘要」。
+- `current.md` 修订表只保留最近 3 个日期、每个日期一行（同日覆盖不堆叠）；任务防丢失靠 `task_todo.md` / `task_progress.md` / `state/tasks.json`。

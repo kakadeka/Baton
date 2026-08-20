@@ -8,12 +8,13 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立交接记录。 |
+| {{DATE}} | Cursor | Baton init 建立交接记录。 |
 
 ## 交接条目模板（追加到文件末尾，保持最新在末）
 
 ```markdown
-### HO-YYYYMMDD-HHMM-<Agent>｜<From> → <To>
+### HO-YYYYMMDD-HHMM-<Agent>｜下班收尾｜<关键词>
+> Agent 只允许：Cursor / Codex / Claude / DeepSeek / workbuddy；时间东八区。
 - 时间：YYYY-MM-DD HH:MM
 - 交接状态：<状态>
 - 任务 ID / 状态：

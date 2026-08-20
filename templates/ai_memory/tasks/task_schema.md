@@ -8,7 +8,7 @@
 
 | 日期 | 修改人 | 变更概要 |
 | --- | --- | --- |
-| {{DATE}} | Baton | Baton init 建立任务规范。 |
+| {{DATE}} | Cursor | Baton init 建立任务规范。 |
 
 ## 任务 ID
 

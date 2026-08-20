@@ -1,13 +1,18 @@
 # Baton 跨 AI 安装脚本（Codex / Claude Code / Cursor 薄适配器）
 # 用法: pwsh -File baton-sync.ps1 -ProjectRoot <项目根目录> [-SkillSource <SKILL.md 路径>]
 # 功能: ① 镜像 SKILL.md 到三端 skills 目录（幂等）② 在三端入口文件插入/更新 Baton 入口段（幂等，不覆盖原有内容）
+#       ③ 写入 Cursor 规则 .cursor/rules/baton.mdc（整文件模板，不含 HTML marker）
 param(
-  [Parameter(Mandatory = $true)][string]$ProjectRoot,
+  [string]$ProjectRoot = '',
   [string]$SkillSource = (Join-Path $PSScriptRoot '..\skills\baton\SKILL.md'),
   [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
 function Write-Step($m) { Write-Host "==> $m" }
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+  Write-Host '用法: pwsh -File baton-sync.ps1 -ProjectRoot <项目根目录> [-SkillSource <SKILL.md 路径>] [-DryRun]'
+  exit 1
+}
 
 if (-not (Test-Path $SkillSource)) { throw "找不到 SKILL.md: $SkillSource" }
 $skill = Get-Content $SkillSource -Raw
@@ -84,6 +89,28 @@ foreach ($e in $entries) {
     $newContent = if ($existing -eq '') { $wrapped2.TrimEnd() + $eol2 } else { $existing.TrimEnd() + $eol2 + $eol2 + $wrapped2.TrimEnd() + $eol2 }
     Set-Content $e.File $newContent -Encoding UTF8
     Write-Step "已写入入口 $($e.File)（成对 marker）"
+  }
+}
+
+# ③ Cursor 现代规则文件（整文件覆盖；不含 BATON HTML marker，以免破坏 YAML frontmatter）
+$mdcSrc = Join-Path $PSScriptRoot '..\templates\adapter\CURSOR.rules.mdc'
+$mdcDest = Join-Path $ProjectRoot '.cursor\rules\baton.mdc'
+if (Test-Path $mdcSrc) {
+  $mdcSeg = Get-Content $mdcSrc -Raw -Encoding UTF8
+  if ($DryRun) {
+    Write-Step "将写入 $mdcDest"
+  } else {
+    $mdcExisting = if (Test-Path $mdcDest) { Get-Content $mdcDest -Raw -Encoding UTF8 } else { '' }
+    $mdcNorm = { param($s) ($s -replace "`r`n", "`n") }
+    if ($mdcExisting -ne '' -and $mdcExisting -notmatch 'Baton 项目协作入口') {
+      Write-Step "跳过 $mdcDest（已有非 Baton 内容，不覆盖）"
+    } elseif ((& $mdcNorm $mdcExisting) -eq (& $mdcNorm $mdcSeg)) {
+      Write-Step "Cursor 规则 $mdcDest 已是最新（零写入）"
+    } else {
+      New-Item -ItemType Directory -Force (Split-Path $mdcDest -Parent) | Out-Null
+      [System.IO.File]::WriteAllText($mdcDest, ((& $mdcNorm $mdcSeg).TrimEnd() + "`n"), (New-Object System.Text.UTF8Encoding $false))
+      Write-Step "已写入 Cursor 规则 $mdcDest"
+    }
   }
 }
 
