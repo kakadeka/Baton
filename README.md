@@ -1,8 +1,9 @@
-<!-- baton-src: README.zh-CN.md sha256:32b7252025e2 status:current -->
-# 🥁 Baton — Pass the project, not the repeated explanation
+<!-- baton-src: README.zh-CN.md sha256:718df7f0a379 status:current -->
+
+# 🥁 Baton — Switch AI, Not Your Project Memory
 
 <p align="center">
-  <img src="./gittop.png" alt="Baton — Pass the project, not the repeated explanation" width="100%">
+  <img src="./gittop.png" alt="Baton — pass the project, not the context" width="100%">
 </p>
 
 <p align="center">
@@ -12,397 +13,380 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/node-%3E%3D18-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
-  <img src="https://img.shields.io/badge/git-required-F05032?logo=git&logoColor=white" alt="Git required">
-  <img src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1+">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Windows, macOS and Linux">
-</p>
-
-<p align="center">
   <a href="README.zh-CN.md">简体中文</a> · <strong>English</strong>
 </p>
 
-Baton is an AI project handoff system built from **skills, project-local Markdown/JSON, and Git**. It lets Codex, Cursor, Claude Code, and DeepSeek Harness continue from the same tasks, memory, design specifications, and handoff records.
+You switch to another AI. It looks at your project and asks:
 
-Baton does not replace Git, and its mechanical guarantees are not identical on every AI host. DeepSeek Harness installs a native plugin with 19 `baton_*` tools. Codex, Cursor, and Claude Code follow the equivalent workflow through skills and project rules; their automation still depends on host capabilities, permissions, network access, and Git credentials.
+> So... what were we doing?
 
-## Contents
+You sigh and retell the entire story from the invention of electricity.
 
-- [Choose an installation level](#choose-level)
-- [Prerequisites](#prerequisites)
-- [Install for Codex](#install-codex)
-- [Install for Cursor](#install-cursor)
-- [Install for Claude Code](#install-claude)
-- [Install for DeepSeek Harness](#install-dsh)
-- [First run and verification](#first-run)
-- [Switch computers or AI tools](#switch-host)
-- [Common commands](#commands)
-- [Project files and capability boundaries](#truth-and-capabilities)
-- [Update, uninstall, and troubleshooting](#maintenance)
+Baton is a relay baton for AI-assisted projects. It keeps tasks, progress, design rules, lessons learned, and handoffs inside your project, then carries them to another computer or AI through Git.
 
-<a id="choose-level"></a>
-## Choose an installation level
+It supports **Codex, Cursor, Claude Code, and DeepSeek Harness**.
 
-Decide which problem you want to solve before installing.
+## The 20-second explanation: where do I type things?
 
-| Level | Use it when | What it does | What it does not do |
-|---|---|---|---|
-| **User-level** | You want the AI tools on this computer to recognize Baton commands in any project | Installs the main Baton skill and three read-only specialist skills under your user directory | Does not create `docs/ai_memory/` in a project and does not give that project Git-synced memory |
-| **Project-level** | One project must be handed between computers or AI tools | Creates the memory skeleton, config, three skill mirrors, and host entry rules inside the project | Does not install Git, an AI application, or a DeepSeek Harness profile plugin |
-| **Both** | This is your regular computer and the project needs long-term handoff | User-level makes Baton discoverable everywhere; project-level gives this project portable memory | — |
+Read this table first. It may save you half an hour of creative confusion.
 
-Recommended: install user-level once on your regular computer, then install project-level once in each real project that needs handoff.
+| What you type | Where you type it | What it does |
+|---|---|---|
+| <code>git clone ...</code> | **PowerShell / terminal** | Downloads Baton |
+| <code>baton-install.ps1</code> | **PowerShell / terminal** | Teaches your AI about Baton |
+| <code>Baton init</code> | **AI chat** | Adds Baton memory to the project you opened |
+| <code>clock in</code> | **AI chat** | Reads the project state and starts work |
 
-> Codex, Cursor, and Claude Code use the same user-level command. One run installs the skills for all three tools. The sections below repeat the command so a first-time user can stay inside the section for their tool; do not run it three times.
+The one-line version:
 
-<a id="prerequisites"></a>
-## Prerequisites
+> **The terminal installs Baton. The AI chat uses Baton.**<br>
+> <code>Baton init</code> is not a Git command. PowerShell has no idea what you mean.
 
-| Environment | Requirements |
-|---|---|
-| Windows | Git and Node.js 18+. The built-in Windows PowerShell 5.1 can run the installer; PowerShell 7 also works |
-| macOS / Linux | Git, Node.js 18+, and PowerShell 7. Run the PowerShell commands below from `pwsh` |
-| DeepSeek Harness | Node.js 18+. If the DSH CLI is missing, run `npm install -g @deepseek-ai/dsh@latest` |
+## 🛝 Beginner quick start: three steps
 
-Check your environment:
+This is the recommended path. On your first visit, this is the only section you need.
 
-```powershell
-git --version
-node --version
-$PSVersionTable.PSVersion
-```
+Before you start, install:
 
-If Git is missing, install it from [git-scm.com](https://git-scm.com/downloads). On Windows, reopen PowerShell after installation.
+- [Git](https://git-scm.com/downloads)
+- [Node.js 18+](https://nodejs.org/)
+- Windows: the built-in Windows PowerShell 5.1 works
+- macOS / Linux: install [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell), then run the commands inside <code>pwsh</code>
 
-The bootstrap commands below place the Baton source checkout at `$HOME/Baton`. If that directory is already a Baton Git checkout, only an `ff-only` update is allowed. If a non-Git directory already uses that name, the command stops and asks you to move or rename it; it never overwrites the directory.
+### Step 1: Install Baton in your terminal
+
+#### If you use Codex, Cursor, or Claude Code
+
+Open **PowerShell** and run these two lines:
+
+~~~powershell
+git clone https://github.com/kakadeka/Baton.git "$HOME/Baton"
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope User
+~~~
+
+That is it. The first line downloads Baton. The second installs it. No side quest.
+
+One run installs the user-level Skills for Codex, Cursor, and Claude Code together. Do not run it three times.
+
+Already have <code>$HOME/Baton</code>? Do not clone it again. Update it instead:
+
+~~~powershell
+git -C "$HOME/Baton" pull --ff-only
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope User
+~~~
+
+When installation finishes, **restart your AI or open a new session**. Skills are usually loaded when a session starts.
+
+#### If you use DeepSeek Harness
+
+Run this in your terminal:
+
+~~~powershell
+npm install -g @deepseek-ai/dsh@latest
+dsh plugin --profile web add @kakadeka/dsh-baton
+~~~
+
+Restart the DSH <code>web</code> profile. If you use another profile, replace <code>web</code> with its real name.
+
+### Step 2: Initialize your project in AI chat
+
+Use Codex, Cursor, Claude Code, or DSH to **open the project you actually want to work on**.
+
+Then send this message in the **AI chat**:
+
+~~~text
+Baton init
+~~~
+
+Send it to the AI, not PowerShell.
+
+The AI prepares <code>docs/ai_memory/</code>, <code>.baton/config.json</code>, and the host entry files for the current project. Existing project documents are not silently overwritten; conflicts stop with an explanation.
+
+When <code>docs/ai_memory/</code> appears in your project, this step worked.
+
+### Step 3: Start work in AI chat
+
+Open a new AI session and say:
+
+~~~text
+clock in
+~~~
+
+The AI should check Git, read the latest progress and handoff, then show a task table.
+
+Congratulations. You have finished the installation guide. Everything below is optional detail.
+
+## What did those three steps do?
+
+~~~text
+Step 1: Install Baton on this computer
+                  ↓
+Step 2: Add relay memory to this project
+                  ↓
+Step 3: Read the memory and start working
+~~~
+
+- **User-level installation**: usually once per computer. It teaches the AI Baton commands.
+- **Project initialization**: once per project that needs handoffs. It adds the memory structure to the project.
+- **Normal work**: no more installing. Say <code>clock in</code>, <code>continue work</code>, or <code>clock out</code>.
+
+Step 1 alone lets the AI recognize Baton, but the project still has no long-term memory.<br>
+Manual project installation also works, but beginners do not need to start there.
+
+## Where did Baton install for my AI?
+
+The daily commands are shared. The installation paths differ.
 
 <a id="install-codex"></a>
-## Install for Codex
+### Codex
 
-### Codex user-level installation
+The user-level installation creates:
 
-Use this when you want Codex on this computer to recognize commands such as `clock in` and `continue work` in any project.
+~~~text
+~/.agents/skills/baton/SKILL.md
+~/.agents/skills/baton-lean-review/SKILL.md
+~/.agents/skills/baton-debt/SKILL.md
+~/.agents/skills/baton-doctor/SKILL.md
+~/.agents/skills/baton/version.json
+~~~
 
-Paste this complete line into PowerShell:
-
-```powershell
-$baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton exists but is not a Git checkout. Move or rename it, then retry." } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Could not download or update Baton. Check the Git error above.' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope User
-```
-
-Codex-related output:
-
-- `~/.agents/skills/baton/SKILL.md`
-- `~/.agents/skills/baton-lean-review/SKILL.md`
-- `~/.agents/skills/baton-debt/SKILL.md`
-- `~/.agents/skills/baton-doctor/SKILL.md`
-- `~/.agents/skills/baton/version.json`
-
-Start a new Codex task or session after installation so skills are reloaded. User-level installation teaches Codex about Baton but does not modify the current project.
-
-### Codex project-level installation
-
-Use this when the project needs durable memory that travels through Git.
-
-Enter the project directory, then paste the second line:
-
-```powershell
-cd C:\path\to\your-project
-$project = (Get-Location).Path; $baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton exists but is not a Git checkout. Move or rename it, then retry." } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Could not download or update Baton. Check the Git error above.' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope Project -ProjectRoot $project
-```
-
-On macOS or Linux, replace the first line with your path, for example `cd /Users/me/my-project`.
-
-Codex-related project files include `AGENTS.md`, `.agents/skills/baton/`, `docs/ai_memory/`, and `.baton/config.json`. The installer also creates the Cursor and Claude Code adapters so the project can switch tools later.
+After <code>Baton init</code>, the project also has <code>AGENTS.md</code> and <code>.agents/skills/baton/</code>.
 
 <a id="install-cursor"></a>
-## Install for Cursor
+### Cursor
 
-### Cursor user-level installation
+The user-level installation creates:
 
-Use this when you want Cursor on this computer to discover Baton in any project.
+~~~text
+~/.cursor/skills/baton/SKILL.md
+~/.cursor/skills/baton-lean-review/SKILL.md
+~/.cursor/skills/baton-debt/SKILL.md
+~/.cursor/skills/baton-doctor/SKILL.md
+~/.cursor/skills/baton/version.json
+~~~
 
-Paste this complete line into PowerShell:
-
-```powershell
-$baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton exists but is not a Git checkout. Move or rename it, then retry." } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Could not download or update Baton. Check the Git error above.' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope User
-```
-
-Cursor-related output:
-
-- `~/.cursor/skills/baton/SKILL.md`
-- `~/.cursor/skills/baton-lean-review/SKILL.md`
-- `~/.cursor/skills/baton-debt/SKILL.md`
-- `~/.cursor/skills/baton-doctor/SKILL.md`
-- `~/.cursor/skills/baton/version.json`
-
-Restart Cursor or open a new Agent session after installation. User-level installation does not create project memory.
-
-### Cursor project-level installation
-
-```powershell
-cd C:\path\to\your-project
-$project = (Get-Location).Path; $baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton exists but is not a Git checkout. Move or rename it, then retry." } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Could not download or update Baton. Check the Git error above.' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope Project -ProjectRoot $project
-```
-
-Cursor-related project files include `.cursorrules`, `.cursor/rules/baton.mdc`, `.cursor/skills/baton/`, `docs/ai_memory/`, and `.baton/config.json`. If a non-Baton `.cursor/rules/baton.mdc` already exists, the installer skips it instead of overwriting it.
+After <code>Baton init</code>, the project also has <code>.cursorrules</code>, <code>.cursor/rules/baton.mdc</code>, and <code>.cursor/skills/baton/</code>.
 
 <a id="install-claude"></a>
-## Install for Claude Code
+### Claude Code
 
-### Claude Code user-level installation
+The user-level installation creates:
 
-Use this when you want Claude Code on this computer to discover the Baton skill in any project.
+~~~text
+~/.claude/skills/baton/SKILL.md
+~/.claude/skills/baton-lean-review/SKILL.md
+~/.claude/skills/baton-debt/SKILL.md
+~/.claude/skills/baton-doctor/SKILL.md
+~/.claude/skills/baton/version.json
+~~~
 
-Paste this complete line into PowerShell:
-
-```powershell
-$baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton exists but is not a Git checkout. Move or rename it, then retry." } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Could not download or update Baton. Check the Git error above.' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope User
-```
-
-Claude Code-related output:
-
-- `~/.claude/skills/baton/SKILL.md`
-- `~/.claude/skills/baton-lean-review/SKILL.md`
-- `~/.claude/skills/baton-debt/SKILL.md`
-- `~/.claude/skills/baton-doctor/SKILL.md`
-- `~/.claude/skills/baton/version.json`
-
-Open a new Claude Code session after installation. User-level installation does not create `CLAUDE.md` or project memory.
-
-### Claude Code project-level installation
-
-```powershell
-cd C:\path\to\your-project
-$project = (Get-Location).Path; $baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton exists but is not a Git checkout. Move or rename it, then retry." } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Could not download or update Baton. Check the Git error above.' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope Project -ProjectRoot $project
-```
-
-Claude Code-related project files include `CLAUDE.md`, `.claude/skills/baton/`, `docs/ai_memory/`, and `.baton/config.json`. The installer updates only the marker-bounded Baton entry inside `CLAUDE.md`; it does not overwrite unrelated content.
+After <code>Baton init</code>, the project also has <code>CLAUDE.md</code> and <code>.claude/skills/baton/</code>.
 
 <a id="install-dsh"></a>
-## Install for DeepSeek Harness
+### DeepSeek Harness
 
-DeepSeek Harness has two levels: install the plugin into a DSH profile, then run `Baton init` in each project that needs Baton memory.
+For DSH, Step 1 is a **profile-level plugin installation**:
 
-DSH does not use the user-level skill directories used by Codex, Cursor, and Claude Code. Its closest equivalent to user-level installation is **profile-level plugin installation**.
-
-### DSH profile-level installation
-
-If the DSH CLI is not installed:
-
-```powershell
-npm install -g @deepseek-ai/dsh@latest
-```
-
-Install Baton into the `web` profile:
-
-```powershell
+~~~powershell
 dsh plugin --profile web add @kakadeka/dsh-baton
-```
+~~~
 
-If you use `tui`, `headless`, or a custom profile, replace `web` with the real profile name. Restart that DSH profile after installation. This supplies 19 native `baton_*` tools, but it does not initialize a project yet.
+It installs 19 native <code>baton_*</code> tools into that profile. Step 2 is still a message in the AI chat for the target project:
 
-You can also install directly from GitHub:
-
-```powershell
-dsh plugin --profile web add github:kakadeka/Baton
-```
-
-### DSH project-level initialization
-
-1. Start DSH with the target project as the working directory.
-2. In a new conversation, say:
-
-```text
+~~~text
 Baton init
-```
+~~~
 
-3. Confirm that `docs/ai_memory/`, `.baton/config.json`, and the host entry files appear in the project.
+The profile plugin stays on this computer. It does not travel through the project Git repository. The project memory does.
 
-A DSH profile plugin does not travel with the project repository. Install the plugin again for the corresponding profile on every computer. Project memory and config should travel through the project's Git repository.
+## Manual project installation: the backup route
 
-<a id="first-run"></a>
-## First run and verification
+Most beginners do not need this section. Use it only when:
 
-### 1. Confirm that the project is a Git repository
+- the AI does not recognize <code>Baton init</code>; or
+- you deliberately want to initialize from the terminal.
 
-Baton's sync, handoff, and remote-SHA verification require Git. If the installer reports that `.git` is missing, review the files to be committed, then initialize the repository:
+Enter your project and run:
 
-```powershell
+~~~powershell
+cd C:\path\to\your-project
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope Project -ProjectRoot (Get-Location).Path
+~~~
+
+This has the same goal as saying <code>Baton init</code>: it adds memory and host adapters to the **current project**. Pick one route. You do not need both.
+
+If <code>$HOME/Baton</code> does not exist, complete Step 1 first.
+
+## Before the first commit, look at Git
+
+Baton uses Git to move project memory between computers. Existing Git repositories do not need another <code>git init</code>.
+
+For a brand-new project:
+
+~~~powershell
 git init
-git add -A
-git commit -m "init: add Baton project memory"
-```
+git status
+~~~
 
-If Git asks for your name and email, configure them as instructed and retry the commit. Do not run `git init` again in an existing repository.
+Use <code>git status</code> to see what will be committed before choosing when to run <code>git add</code> and <code>git commit</code>. Surprises belong at birthday parties, not in <code>git add -A</code>.
 
-### 2. Start a new AI session
+## Everyday commands
 
-Skills and project rules are normally loaded when a session starts. Open a new Codex, Cursor, or Claude Code session, or restart the DSH profile.
+Send these to the **AI chat**, not the terminal.
 
-### 3. Say the command
-
-```text
-clock in
-```
-
-In a Chinese session, you can say `上班啦` instead. Success should show the branch, HEAD, working-tree state, sync result, latest handoff, and a task table. Exact formatting can differ by host.
-
-> With user-level installation only, the AI can recognize Baton, but the project still lacks the full memory skeleton. For durable handoff, install project-level or say `Baton init`.
-
-<a id="switch-host"></a>
-## Switch computers or AI tools
-
-### The project already has project-level installation
-
-1. Install Git and the AI tool you want on the new computer.
-2. Clone your project.
-3. Open a new session in the project and say `clock in` or `continue work`.
-
-`docs/ai_memory/`, the three project skill mirrors, and the entry rules travel through Git. Codex, Cursor, and Claude Code normally do not need user-level installation again for that project.
-
-DeepSeek Harness is the exception: project memory travels through Git, but the DSH profile plugin must be installed separately on every computer/profile.
-
-### The computer only has user-level installation
-
-User-level skills do not write project memory into Git. They cannot restore tasks and handoffs on another computer by themselves. Add project-level installation to every project that needs durable handoff.
-
-<a id="commands"></a>
-## Common commands
-
-| Command | Purpose |
+| You say | Baton does |
 |---|---|
-| `clock in` / `start work` | Check Git and sync state, read the handoff and todos, then show a task table |
-| `continue work` / `resume` | Restore the current task, handoff tail, and single next step |
-| `complete task` | Move the current task to awaiting acceptance; it becomes completed only after explicit user acceptance |
-| `clock out` / `end work` | Verify, update docs, commit, push, and compare the remote SHA. Network or credential failure must be reported as incomplete |
-| `update project docs` | Write the current progress and a handoff checkpoint without a full workday closeout |
-| `save design spec` | Save user-confirmed design facts for future UI work |
-| `remember this pitfall` | Store a verified pitfall in long-term memory and the index |
-| `record this decision` | Store a technical decision, trade-offs, and validation boundary |
-| `Baton init` | Initialize project memory, config, and three host adapters |
-| `check update` | Read-only comparison of local version anchors with the latest GitHub/npm version |
-| `update baton` | After confirmation, update the source/package, rerun installation, and verify the installed version |
+| <code>clock in</code> | Checks Git, reads the handoff and tasks, then shows a task table |
+| <code>continue work</code> | Continues from the last next step instead of excavating the whole project |
+| <code>complete task</code> | Moves the task to awaiting acceptance; it is completed only after you accept |
+| <code>update project docs</code> | Saves progress and a handoff without ending the workday |
+| <code>remember this pitfall</code> | Adds a verified lesson to long-term memory |
+| <code>record this decision</code> | Saves a technical decision and its trade-offs |
+| <code>clock out</code> | Verifies, records, commits, pushes, and checks the remote SHA |
+| <code>check update</code> | Checks for a Baton update without changing anything |
+| <code>update baton</code> | Updates after confirmation, then verifies the installed version |
 
-<a id="truth-and-capabilities"></a>
-## Project files and capability boundaries
+Chinese commands such as <code>上班啦</code>, <code>继续工作</code>, and <code>下班啦</code> are equivalent.
 
-### What project-level installation creates
+## Switching computers or AI tools
 
-```text
+### Another AI, same project
+
+Open the same project with another AI and say:
+
+~~~text
+continue work
+~~~
+
+Codex, Cursor, and Claude Code read the project Skills and <code>docs/ai_memory/</code>. DSH also needs the plugin installed in the relevant profile on this computer.
+
+### Another computer
+
+1. Install Git and the AI tool on the new computer.
+2. <code>git clone</code> **your own project**.
+3. Open it with the AI and say <code>clock in</code> or <code>continue work</code>.
+
+This time you clone your project, not the Baton installer repository.<br>
+If the new computer has no user-level Skills, repeat Step 1. DSH always needs its profile plugin installed on each computer.
+
+## What appears in my project?
+
+~~~text
 your-project/
-├── AGENTS.md                       # Codex entry segment
-├── CLAUDE.md                       # Claude Code entry segment
+├── AGENTS.md                       # Codex entry
+├── CLAUDE.md                       # Claude Code entry
 ├── .cursorrules                    # Cursor compatibility entry
-├── .agents/skills/baton/           # Codex project skill mirror
-├── .claude/skills/baton/           # Claude Code project skill mirror
-├── .cursor/skills/baton/           # Cursor project skill mirror
-├── .cursor/rules/baton.mdc         # Cursor modern rule
-├── docs/ai_memory/                 # Git-synced long-term project truth
-│   ├── current.md
-│   ├── handoff_current.md
-│   ├── overview.md
-│   ├── state/
-│   ├── tasks/
-│   ├── knowledge/
-│   └── ui_spec/
+├── .agents/skills/baton/           # Codex project Skill
+├── .claude/skills/baton/           # Claude Code project Skill
+├── .cursor/skills/baton/           # Cursor project Skill
+├── .cursor/rules/baton.mdc         # Modern Cursor rule
+├── docs/ai_memory/                 # Long-term project memory tracked by Git
 └── .baton/
-    ├── config.json                 # Exception: commit this project gate/routing config
-    ├── version.json                # Local version anchor, ignored
-    ├── manifest.json               # Managed-file hashes; commit for cross-machine safe uninstall
-    └── local/                      # Local metrics and temporary evidence, ignored
-```
+    ├── config.json                 # tracked: project gates and routing
+    ├── manifest.json               # tracked: installer-managed file hashes
+    ├── version.json                # ignored: local version anchor
+    └── local/                      # ignored: local temporary data
+~~~
 
-`.baton/` is not entirely ignored. Commit `config.json` and `manifest.json`; ignore `version.json`, `local/`, private scan lists, and other machine-local files.
+Important: not all of <code>.baton/</code> is ignored. <code>config.json</code> and <code>manifest.json</code> should be tracked. <code>version.json</code>, <code>local/</code>, and private scan patterns stay local.
 
-### Capability differences between hosts
+## The four hosts are not identical
 
 | Capability | Codex / Cursor / Claude Code | DeepSeek Harness |
 |---|---|---|
-| Project memory, tasks, handoffs, design specs | Skills + Markdown/JSON | The same project files |
-| Git sync and remote-SHA verification | The AI invokes host commands according to the skill; permissions, network, and credentials still apply | Native tool orchestration; network and credentials still apply |
-| Native `baton_*` tools | No; uses the plugin-free workflow | Yes; the current bundle provides 19 |
-| Single-writer lock | File/Git-level rule enforcement; not a host-atomic guarantee | The plugin can provide stronger mechanical gates |
-| Approval receipts and actual model identity | Depends on what the host exposes; unknown facts must remain `unknown` | The plugin can use DSH host events and approval services |
-| Subagent/model routing | Uses only capabilities actually offered by the current host | Uses only configured and verified DSH providers/models |
+| Project memory, tasks, and handoffs | Skill + Markdown/JSON | The same project files |
+| Git operations | The AI invokes host commands under Skill rules | Native tool orchestration |
+| Native <code>baton_*</code> tools | No; follows the equivalent Skill workflow | Yes; currently 19 tools |
+| Single-writer protection | File/Git rules, not a host-level atomic lock | Stronger mechanical gates from the plugin |
+| Model identity and approval evidence | Recorded as <code>unknown</code> when the host does not expose it | Can use DSH host events and approval services |
 
-Shared workflow does not mean identical mechanical guarantees on all four hosts.
+The project memory and workflow are shared. The automation and mechanical guarantees are not. Baton does not pretend that four different hosts have identical internals.
 
-<a id="maintenance"></a>
-## Update, uninstall, and troubleshooting
+## Updating and uninstalling
 
-### Update Baton
+### Update
 
-The simplest method is to tell your AI:
+The easy route: say <code>check update</code> in AI chat. If an update exists, say <code>update baton</code>.
 
-```text
-check update
-```
+To update manually in the terminal:
 
-Checking is read-only. If a new version exists, say `update baton` after you decide to update. Codex, Cursor, and Claude Code update `$HOME/Baton` and rerun the relevant installer. DSH updates the npm bundle inside the profile. Start a new session or restart DSH afterward.
+~~~powershell
+git -C "$HOME/Baton" pull --ff-only
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope User
+~~~
 
-You can also rerun the user-level or project-level command from this README. The command allows only an `ff-only` update of the Baton source checkout.
+Open a new AI session afterward. Restart the DSH profile after updating its plugin.
 
-### Safe project-level uninstall
+### Safe project uninstall
 
 Preview first without writing:
 
-```powershell
-$baton = Join-Path $HOME 'Baton'; & (Join-Path $baton 'scripts\baton-uninstall.ps1') -ProjectRoot 'C:\path\to\your-project' -DryRun
-```
+~~~powershell
+& "$HOME/Baton/scripts/baton-uninstall.ps1" -ProjectRoot "C:\path\to\your-project" -DryRun
+~~~
 
-After reviewing the output, remove `-DryRun` to execute. The default keeps `docs/ai_memory/` and `.baton/config.json`. Only explicit `-RemoveMemory` deletes project truth. Managed files changed since installation are kept when their hashes do not match.
+Remove <code>-DryRun</code> after reviewing the output. Project memory in <code>docs/ai_memory/</code> and <code>.baton/config.json</code> is preserved by default. Only <code>-RemoveMemory</code> removes it.
 
-The current uninstall script handles **project-level** files only. It does not remove user-level global skills. To remove user-level installation, delete only the `baton`, `baton-lean-review`, `baton-debt`, and `baton-doctor` subdirectories under each of these roots; do not delete the entire `skills` directory:
+The current uninstall script handles project-level files only. To remove user-level Skills, delete only the <code>baton</code>, <code>baton-lean-review</code>, <code>baton-debt</code>, and <code>baton-doctor</code> subdirectories below. Do not delete the entire <code>skills</code> directory:
 
-- `~/.agents/skills/`
-- `~/.cursor/skills/`
-- `~/.claude/skills/`
+- <code>~/.agents/skills/</code>
+- <code>~/.cursor/skills/</code>
+- <code>~/.claude/skills/</code>
 
 Remove the DSH profile plugin with:
 
-```powershell
+~~~powershell
 dsh plugin --profile web remove @kakadeka/dsh-baton
-```
+~~~
 
-### Troubleshooting
+## Stuck? Start here
 
-#### `baton-install.ps1 is not recognized` or the script file does not exist
+### <code>git clone</code> says <code>$HOME/Baton</code> already exists
 
-You used an old command that invokes the script directly, but `$HOME/Baton` has not been downloaded. Return to the section for your AI tool and copy the complete bootstrap command containing `git clone`.
+You downloaded it before. Do not clone it again:
 
-#### `pwsh` is not recognized
+~~~powershell
+git -C "$HOME/Baton" pull --ff-only
+~~~
 
-- Windows: open the built-in PowerShell and use the commands beginning with `$baton = ...`; they do not require `pwsh`.
-- macOS / Linux: install PowerShell 7, enter `pwsh`, and then run the commands.
+If that directory is not a Git repository, inspect it for important files and rename it manually. Baton does not overwrite it for you.
 
-#### `$HOME/Baton` exists but is not a Git checkout
+### <code>baton-install.ps1</code> does not exist
 
-The command stops to avoid overwriting the directory. Move or rename that directory, then retry.
+The Step 1 clone probably failed. Read the Git error above it instead of skipping straight to the second command.
 
-#### Installation succeeded, but `clock in` does nothing
+### macOS or Linux says <code>pwsh</code> does not exist
 
-1. Start a new AI session or restart the DSH profile.
-2. Confirm that the `SKILL.md` path for your AI tool exists.
-3. Confirm that the project has project-level installation and `docs/ai_memory/`.
-4. Confirm that the repository has a readable Git HEAD; a new repository needs its first commit.
-5. Ask the AI to “run `clock in` according to the Baton skill” and check whether it reports a missing skill or insufficient permissions.
+Install PowerShell 7, enter <code>pwsh</code>, and then run the PowerShell commands from this guide.
 
-#### `git pull --ff-only` reports divergence
+### Installation worked, but <code>Baton init</code> does nothing
 
-The command stops. It does not rebase, reset, or overwrite local work. Inspect `git status` and the branch difference inside `$HOME/Baton` before deciding what to do. Do not use `reset --hard` merely to force installation.
+1. Open a new AI session or restart the DSH profile.
+2. Check that the user-level <code>SKILL.md</code> exists for your AI.
+3. Confirm that the AI opened your project, not the <code>$HOME/Baton</code> installer directory.
+4. Tell the AI: “Use the Baton skill to run <code>Baton init</code>.”
 
-#### Workday closeout did not push successfully
+### <code>git pull --ff-only</code> cannot fast-forward
 
-Baton should report closeout complete only after `git push` succeeds and the remote SHA equals local HEAD. Network, permission, credential, or branch-protection failures must be reported as incomplete.
+Baton stops. It does not secretly rebase, reset, or overwrite changes. Inspect the installer repository:
 
-## Safety principles
+~~~powershell
+git -C "$HOME/Baton" status
+~~~
 
-- No force push, `reset --hard`, risky `clean`, or unauthorized rebase.
-- Sync is `ff-only`; divergence stops and reports.
-- API keys, tokens, passwords, and private keys must not enter Git, project memory, metrics, or handoffs.
-- History is append-only or explicitly marked superseded; old decisions are not silently overwritten.
-- Task scope, protected paths, validation evidence, and remote SHA claims must come from real files and command output.
-- Non-DSH hosts degrade mechanical guarantees according to platform capability. Documentation and AI responses must not describe rule-level constraints as plugin-level atomic guarantees.
+Understand the difference before choosing a fix. Do not use <code>reset --hard</code> just to update the installer.
+
+### <code>clock out</code> did not push
+
+Baton should report a completed clock-out only when <code>git push</code> succeeds and the remote SHA equals local HEAD. Network, permission, credential, or branch-protection failures mean “not finished yet.” No acting.
+
+## Safety floor
+
+- No force push, <code>reset --hard</code>, dangerous <code>clean</code>, or surprise rebase.
+- Synchronization defaults to <code>ff-only</code>; divergence stops the workflow.
+- API keys, tokens, passwords, and private keys stay out of Git, project memory, reports, and handoffs.
+- History is append-only or explicitly marked as superseded.
+- The public Baton repository contains runtime files only, never your project's <code>docs/ai_memory/</code>.
 
 ## Repository and license
 
@@ -410,4 +394,4 @@ Baton should report closeout complete only after `git push` succeeds and the rem
 - npm: [@kakadeka/dsh-baton](https://www.npmjs.com/package/@kakadeka/dsh-baton)
 - License: [Apache-2.0](./LICENSE)
 
-The public repository contains only the published runtime surface. A user's own `docs/ai_memory/`, internal plans, session records, and credentials are not part of the public package.
+**Pass your project, not your context.** 🥁

@@ -1,4 +1,4 @@
-# 🥁 Baton — 把项目传下去，不必反复解释上下文
+# 🥁 Baton — 换个 AI，项目也别失忆
 
 <p align="center">
   <img src="./gittop.png" alt="Baton — 把项目传下去，不必反复解释上下文" width="100%">
@@ -11,405 +11,380 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/node-%3E%3D18-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
-  <img src="https://img.shields.io/badge/git-required-F05032?logo=git&logoColor=white" alt="Git required">
-  <img src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 5.1+">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Windows, macOS and Linux">
-</p>
-
-<p align="center">
   <strong>简体中文</strong> · <a href="README.md">English</a>
 </p>
 
-Baton 是一个基于 **Skill + 项目内 Markdown/JSON + Git** 的 AI 项目接力系统。它让 Codex、Cursor、Claude Code 和 DeepSeek Harness 从同一套任务、记忆、设计规范与交接记录继续工作。
+你有没有经历过这种循环：
 
-Baton 不会替代 Git，也不能保证所有 AI 宿主拥有同等级的机械能力。DeepSeek Harness 安装的是带 19 个 `baton_*` 工具的原生插件；Codex、Cursor 和 Claude Code 使用 Skill 与项目规则执行等价流程，具体自动化程度仍受当前宿主、权限、网络和 Git 凭据影响。
+> 换了个 AI。它眨眨眼：这个项目做到哪了？
+>
+> 你深吸一口气，又从盘古开天开始讲。
 
-## 导航
+Baton 就是给 AI 项目准备的接力棒。它把任务、进度、设计规范、踩过的坑和交接记录放进项目，再通过 Git 带到下一台电脑、下一个 AI。
 
-- [先选安装层级](#choose-level)
-- [安装前准备](#prerequisites)
-- [Codex 安装](#install-codex)
-- [Cursor 安装](#install-cursor)
-- [Claude Code 安装](#install-claude)
-- [DeepSeek Harness 安装](#install-dsh)
-- [第一次使用与验证](#first-run)
-- [换电脑或换 AI](#switch-host)
-- [常用口令](#commands)
-- [目录与能力边界](#truth-and-capabilities)
-- [更新、卸载与排错](#maintenance)
+支持 **Codex、Cursor、Claude Code、DeepSeek Harness**。
 
-<a id="choose-level"></a>
-## 先选安装层级
+## 先用 20 秒搞懂：到底在哪里输入？
 
-安装前先决定你要解决哪一类问题。
+这个表请先看一眼。真的能少绕半小时。
 
-| 安装层级 | 什么时候用 | 会做什么 | 不会做什么 |
-|---|---|---|---|
-| **用户级** | 希望这台电脑上的 AI 在任意项目里都认识 Baton 口令 | 把 Baton 主 Skill 和 3 个只读专项 Skill 安装到用户目录 | 不会给具体项目创建 `docs/ai_memory/`，也不会让项目自动具备跨电脑记忆 |
-| **项目级** | 希望某个项目能被不同电脑或不同 AI 接手 | 在项目内生成记忆骨架、配置、三端 Skill 镜像和入口规则 | 不会替你安装 Git、AI 软件或 DeepSeek Harness profile 插件 |
-| **两者都装** | 这是你的常用电脑，而且项目需要长期接力 | 用户级负责“任何项目都认识口令”，项目级负责“这个项目真的有可同步记忆” | — |
+| 你要输入的东西 | 输入到哪里 | 它在干什么 |
+|---|---|---|
+| <code>git clone ...</code> | **PowerShell / 终端** | 把 Baton 下载到电脑 |
+| <code>baton-install.ps1</code> | **PowerShell / 终端** | 让 AI 认识 Baton |
+| <code>Baton init</code> | **AI 聊天框** | 给你当前打开的项目建立记忆 |
+| <code>上班啦</code> | **AI 聊天框** | 开始读取进度并继续工作 |
 
-推荐做法：常用电脑先装一次用户级；每个需要接力的真实项目再装一次项目级。
+一句话版：
 
-> Codex、Cursor、Claude Code 的用户级安装命令相同，而且**执行一次会同时安装三端 Skill**。下面仍按工具分章，是为了让第一次使用的人能直接找到与自己相关的路径和验证方法；不要重复执行三遍。
+> **终端负责安装，聊天框负责使用。**<br>
+> <code>Baton init</code> 不是 Git 命令，别把它塞进 PowerShell，它会一脸无辜地看着你。
 
-<a id="prerequisites"></a>
-## 安装前准备
+## 🛝 新手三步上车
 
-| 环境 | 需要准备 |
-|---|---|
-| Windows | Git、Node.js 18+；系统自带 Windows PowerShell 5.1 可以运行安装脚本，也可以使用 PowerShell 7 |
-| macOS / Linux | Git、Node.js 18+；另外安装 PowerShell 7，并在 `pwsh` 里执行下面的 PowerShell 命令 |
-| DeepSeek Harness | Node.js 18+；如果还没有 DSH CLI，执行 `npm install -g @deepseek-ai/dsh@latest` |
+这是推荐路线。第一次用，先只看这一节。
 
-检查命令：
+开始前确认电脑里有：
 
-```powershell
-git --version
-node --version
-$PSVersionTable.PSVersion
-```
+- [Git](https://git-scm.com/downloads)
+- [Node.js 18+](https://nodejs.org/)
+- Windows：系统自带 PowerShell 5.1 就能用
+- macOS / Linux：需要 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)，然后在 <code>pwsh</code> 里运行命令
 
-如果 `git` 不存在，请先从 [git-scm.com](https://git-scm.com/downloads) 安装。Windows 安装完成后要重新打开 PowerShell。
+### 第 1 步：安装 Baton（在终端里）
 
-下面的自举命令会把 Baton 源仓放到 `$HOME/Baton`。如果该目录已经是 Baton Git 仓库，只允许 `ff-only` 更新；如果同名目录存在但不是 Git 仓库，命令会停止并告诉你先改名或移走，不会覆盖它。
+#### 如果你用 Codex、Cursor 或 Claude Code
+
+打开 **PowerShell**，依次复制下面两行：
+
+~~~powershell
+git clone https://github.com/kakadeka/Baton.git "$HOME/Baton"
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope User
+~~~
+
+就两行。第一行下载，第二行安装。没有隐藏剧情。
+
+这条命令会一次装好 Codex、Cursor、Claude Code 三端的用户级 Skill，所以不用重复跑三遍。
+
+如果你以前已经下载过 <code>$HOME/Baton</code>，不要再 <code>clone</code>。改用：
+
+~~~powershell
+git -C "$HOME/Baton" pull --ff-only
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope User
+~~~
+
+安装完后，**重新打开 AI，或者新建一个会话**。Skill 通常在新会话启动时加载。
+
+#### 如果你用 DeepSeek Harness
+
+在终端里运行：
+
+~~~powershell
+npm install -g @deepseek-ai/dsh@latest
+dsh plugin --profile web add @kakadeka/dsh-baton
+~~~
+
+然后重启 DSH 的 <code>web</code> profile。你用的不是 <code>web</code>？把它换成自己的 profile 名就行。
+
+### 第 2 步：初始化你的项目（在 AI 聊天框里）
+
+用 Codex、Cursor、Claude Code 或 DSH **打开你真正要开发的项目文件夹**。
+
+然后在 **AI 聊天框** 发这句话：
+
+~~~text
+Baton init
+~~~
+
+注意，是发给 AI，不是发给 PowerShell。
+
+AI 会为当前项目准备 <code>docs/ai_memory/</code>、<code>.baton/config.json</code> 和对应宿主入口。它不会覆盖你已有的项目文档；遇到冲突会停下来说明。
+
+看到项目里出现 <code>docs/ai_memory/</code>，这一步就算成功。
+
+### 第 3 步：开工（还是在 AI 聊天框里）
+
+新建一个 AI 会话，然后说：
+
+~~~text
+上班啦
+~~~
+
+如果一切正常，AI 会检查 Git、读取最近进度和交接记录，再给你任务表。
+
+恭喜，你已经用完安装教程了。下面都是“想多了解一点再看”的内容。
+
+## 这三步分别做了什么？
+
+~~~text
+第 1 步：安装 Baton 到这台电脑
+              ↓
+第 2 步：给当前项目建立接力记忆
+              ↓
+第 3 步：让 AI 读取记忆，开始工作
+~~~
+
+- **用户级安装**：一台电脑通常只做一次。作用是让 AI 认识 Baton 口令。
+- **项目初始化**：每个需要接力的项目做一次。作用是把记忆骨架放进项目。
+- **以后工作**：不用再安装。直接说“上班啦”“继续工作”“下班啦”。
+
+只做第 1 步，AI 虽然认识 Baton，但项目还没有自己的长期记忆。<br>
+只做项目级手动安装也能用，但新手没必要先走那条路。
+
+## 你的 AI 装到了哪里？
+
+四个工具的日常口令相同，安装落点不同。下面按工具分开写，方便你对号入座。
 
 <a id="install-codex"></a>
-## 安装到 Codex
+### Codex
 
-### Codex 用户级安装
+第 1 步的用户级安装会写入：
 
-适合：希望本机 Codex 在任何项目里都能识别“上班啦”“继续工作”等 Baton 口令。
+~~~text
+~/.agents/skills/baton/SKILL.md
+~/.agents/skills/baton-lean-review/SKILL.md
+~/.agents/skills/baton-debt/SKILL.md
+~/.agents/skills/baton-doctor/SKILL.md
+~/.agents/skills/baton/version.json
+~~~
 
-在 PowerShell 中复制整行：
-
-```powershell
-$baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton 已存在但不是 Git 仓库；请先改名或移走该目录，然后重试。" } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Baton 下载或更新失败，请检查上面的 Git 报错。' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope User
-```
-
-与 Codex 相关的结果：
-
-- `~/.agents/skills/baton/SKILL.md`
-- `~/.agents/skills/baton-lean-review/SKILL.md`
-- `~/.agents/skills/baton-debt/SKILL.md`
-- `~/.agents/skills/baton-doctor/SKILL.md`
-- `~/.agents/skills/baton/version.json`
-
-安装完成后新建一个 Codex 任务或会话，让 Skill 重新加载。用户级安装只让 Codex 认识 Baton，不会改动你当前的项目。
-
-### Codex 项目级安装
-
-适合：这个项目需要保存长期记忆，并随 Git 在不同电脑或 AI 之间同步。
-
-先进入项目目录，再复制第二行：
-
-```powershell
-cd C:\你的项目路径
-$project = (Get-Location).Path; $baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton 已存在但不是 Git 仓库；请先改名或移走该目录，然后重试。" } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Baton 下载或更新失败，请检查上面的 Git 报错。' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope Project -ProjectRoot $project
-```
-
-macOS / Linux 把第一行换成自己的路径，例如 `cd /Users/me/my-project`。
-
-与 Codex 相关的项目文件包括 `AGENTS.md`、`.agents/skills/baton/`、`docs/ai_memory/` 和 `.baton/config.json`。安装器还会同时生成 Cursor 与 Claude Code 的项目适配器，方便以后换工具。
+项目执行 <code>Baton init</code> 后，还会得到 <code>AGENTS.md</code> 和 <code>.agents/skills/baton/</code> 等项目入口。
 
 <a id="install-cursor"></a>
-## 安装到 Cursor
+### Cursor
 
-### Cursor 用户级安装
+第 1 步的用户级安装会写入：
 
-适合：希望本机 Cursor 在任意项目里都能发现 Baton Skill。
+~~~text
+~/.cursor/skills/baton/SKILL.md
+~/.cursor/skills/baton-lean-review/SKILL.md
+~/.cursor/skills/baton-debt/SKILL.md
+~/.cursor/skills/baton-doctor/SKILL.md
+~/.cursor/skills/baton/version.json
+~~~
 
-在 PowerShell 中复制整行：
-
-```powershell
-$baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton 已存在但不是 Git 仓库；请先改名或移走该目录，然后重试。" } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Baton 下载或更新失败，请检查上面的 Git 报错。' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope User
-```
-
-与 Cursor 相关的结果：
-
-- `~/.cursor/skills/baton/SKILL.md`
-- `~/.cursor/skills/baton-lean-review/SKILL.md`
-- `~/.cursor/skills/baton-debt/SKILL.md`
-- `~/.cursor/skills/baton-doctor/SKILL.md`
-- `~/.cursor/skills/baton/version.json`
-
-安装后重新打开 Cursor 或新建 Agent 会话。用户级安装不会在项目里创建记忆目录。
-
-### Cursor 项目级安装
-
-```powershell
-cd C:\你的项目路径
-$project = (Get-Location).Path; $baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton 已存在但不是 Git 仓库；请先改名或移走该目录，然后重试。" } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Baton 下载或更新失败，请检查上面的 Git 报错。' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope Project -ProjectRoot $project
-```
-
-与 Cursor 相关的项目文件包括 `.cursorrules`、`.cursor/rules/baton.mdc`、`.cursor/skills/baton/`、`docs/ai_memory/` 和 `.baton/config.json`。如果项目已有非 Baton 的 `.cursor/rules/baton.mdc`，安装器会跳过而不是覆盖。
+项目执行 <code>Baton init</code> 后，还会得到 <code>.cursorrules</code>、<code>.cursor/rules/baton.mdc</code> 和 <code>.cursor/skills/baton/</code>。
 
 <a id="install-claude"></a>
-## 安装到 Claude Code
+### Claude Code
 
-### Claude Code 用户级安装
+第 1 步的用户级安装会写入：
 
-适合：希望本机 Claude Code 在任意项目里都能识别 Baton Skill。
+~~~text
+~/.claude/skills/baton/SKILL.md
+~/.claude/skills/baton-lean-review/SKILL.md
+~/.claude/skills/baton-debt/SKILL.md
+~/.claude/skills/baton-doctor/SKILL.md
+~/.claude/skills/baton/version.json
+~~~
 
-在 PowerShell 中复制整行：
-
-```powershell
-$baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton 已存在但不是 Git 仓库；请先改名或移走该目录，然后重试。" } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Baton 下载或更新失败，请检查上面的 Git 报错。' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope User
-```
-
-与 Claude Code 相关的结果：
-
-- `~/.claude/skills/baton/SKILL.md`
-- `~/.claude/skills/baton-lean-review/SKILL.md`
-- `~/.claude/skills/baton-debt/SKILL.md`
-- `~/.claude/skills/baton-doctor/SKILL.md`
-- `~/.claude/skills/baton/version.json`
-
-安装完成后新建 Claude Code 会话。用户级安装不会给当前项目生成 `CLAUDE.md` 或记忆骨架。
-
-### Claude Code 项目级安装
-
-```powershell
-cd C:\你的项目路径
-$project = (Get-Location).Path; $baton = Join-Path $HOME 'Baton'; if (Test-Path (Join-Path $baton '.git')) { git -C $baton pull --ff-only } elseif (Test-Path $baton) { throw "$baton 已存在但不是 Git 仓库；请先改名或移走该目录，然后重试。" } else { git clone https://github.com/kakadeka/Baton.git $baton }; if ($LASTEXITCODE -ne 0) { throw 'Baton 下载或更新失败，请检查上面的 Git 报错。' }; & (Join-Path $baton 'scripts\baton-install.ps1') -Scope Project -ProjectRoot $project
-```
-
-与 Claude Code 相关的项目文件包括 `CLAUDE.md`、`.claude/skills/baton/`、`docs/ai_memory/` 和 `.baton/config.json`。安装器只更新带 Baton 成对标记的入口段，不覆盖 `CLAUDE.md` 里的其他内容。
+项目执行 <code>Baton init</code> 后，还会得到 <code>CLAUDE.md</code> 和 <code>.claude/skills/baton/</code>。
 
 <a id="install-dsh"></a>
-## 安装到 DeepSeek Harness
+### DeepSeek Harness
 
-DeepSeek Harness 有两个层级：先把插件安装到某个 DSH profile，再在具体项目里执行 `Baton init`。
+DSH 的第 1 步叫 **profile 级插件安装**：
 
-DSH 不使用 Codex/Cursor/Claude Code 那套“用户级 Skill 目录”；与用户级最接近的是 **profile 级插件安装**。
-
-### DSH profile 级安装
-
-如果还没有 DSH CLI：
-
-```powershell
-npm install -g @deepseek-ai/dsh@latest
-```
-
-把 Baton 安装到 `web` profile：
-
-```powershell
+~~~powershell
 dsh plugin --profile web add @kakadeka/dsh-baton
-```
+~~~
 
-如果你使用 `tui`、`headless` 或自定义 profile，把 `web` 替换成真实 profile 名。安装后重启对应 DSH profile。这个步骤会提供 19 个原生 `baton_*` 工具，但还没有初始化你的项目。
+它会给这个 profile 安装 19 个原生 <code>baton_*</code> 工具。第 2 步仍然要在目标项目的 AI 聊天框说：
 
-也可以直接从 GitHub 安装：
-
-```powershell
-dsh plugin --profile web add github:kakadeka/Baton
-```
-
-### DSH 项目级初始化
-
-1. 用目标项目作为当前工作目录启动 DSH。
-2. 在新会话中说：
-
-```text
+~~~text
 Baton init
-```
+~~~
 
-3. 初始化完成后检查项目中是否出现 `docs/ai_memory/`、`.baton/config.json` 和三端入口文件。
+profile 插件属于这台电脑，不会跟着项目 Git 跑到另一台电脑；项目记忆会。
 
-DSH 的 profile 插件不会随项目 Git 自动复制到另一台电脑；换电脑后要在那台电脑的对应 profile 再安装一次插件。项目级的记忆与配置则应随项目 Git 同步。
+## 手动项目级安装（备用路线）
 
-<a id="first-run"></a>
-## 第一次使用与验证
+绝大多数新手不需要这一节。只有下面两种情况再用：
 
-### 1. 确认项目是 Git 仓库
+- AI 没有识别 <code>Baton init</code>
+- 你明确想从终端初始化项目
 
-Baton 的同步、交接和远端 SHA 核验依赖 Git。如果安装器提示没有 `.git`，请先检查将要提交的文件，再初始化：
+先进入你的项目，再运行安装脚本：
 
-```powershell
+~~~powershell
+cd C:\你的项目路径
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope Project -ProjectRoot (Get-Location).Path
+~~~
+
+这和在聊天框说 <code>Baton init</code> 的目标相同：给**当前项目**创建记忆和四端适配器。两种方式选一种即可，不需要叠加施法。
+
+如果 <code>$HOME/Baton</code> 还不存在，请先完成新手教程第 1 步。
+
+## 第一次提交前，先看一眼 Git
+
+Baton 靠 Git 把项目记忆带到下一台电脑。已有 Git 仓库不需要重复初始化。
+
+如果这是一个全新项目，可以在终端运行：
+
+~~~powershell
 git init
-git add -A
-git commit -m "init: add Baton project memory"
-```
+git status
+~~~
 
-如果 Git 要求姓名和邮箱，按 Git 提示先配置，再重新提交。已有 Git 仓库不要重复执行 `git init`。
+先用 <code>git status</code> 看清楚哪些文件会被提交，再决定什么时候 <code>git add</code> 和 <code>git commit</code>。不建议闭眼 <code>git add -A</code>，毕竟惊喜应该留给生日，不该留给 Git。
 
-### 2. 新建 AI 会话
-
-Skill 与项目规则通常在会话开始时加载。安装完成后，请新建 Codex / Cursor / Claude Code 会话，或重启 DSH profile。
-
-### 3. 说出口令
-
-中文环境：
-
-```text
-上班啦
-```
-
-英文环境：
-
-```text
-clock in
-```
-
-成功时应看到分支、HEAD、工作区状态、同步结论、最近交接和任务表。具体格式可能因宿主不同而略有差异。
-
-> 用户级安装但没有项目级安装时，AI 可以认识口令，但项目里还没有完整记忆骨架。要长期接力，请补做项目级安装或说 `Baton init`。
-
-<a id="switch-host"></a>
-## 换电脑或换 AI
-
-### 已做过项目级安装
-
-1. 在新电脑安装 Git 和你要使用的 AI 工具。
-2. `git clone` 你的项目。
-3. 在项目目录新建会话，说“上班啦”或“继续工作”。
-
-项目中的 `docs/ai_memory/`、三端 Skill 镜像与入口规则会随 Git 到新电脑。Codex、Cursor、Claude Code 在这个项目内通常不要求再次做用户级安装。
-
-DeepSeek Harness 例外：项目记忆会跟着 Git，但 DSH profile 插件必须在每台电脑/profile 单独安装。
-
-### 只做过用户级安装
-
-用户级 Skill 不会把项目记忆写进 Git。换电脑或换项目时，无法仅靠用户级安装恢复任务与交接；请对需要接力的项目补做项目级安装。
-
-<a id="commands"></a>
 ## 常用口令
 
-| 中文口令 | 英文口令 | 作用 |
-|---|---|---|
-| 上班啦 | `clock in` / `start work` | 检查 Git、同步状态、读取交接与待办并给出任务表 |
-| 继续工作 | `continue work` / `resume` | 从当前任务、交接末条与唯一下一步恢复 |
-| 完成 | `complete task` | 把当前任务转为待验收；用户明确验收后才进入已完成 |
-| 下班啦 | `clock out` / `end work` | 验证、更新文档、提交、推送并核对远端 SHA；网络或凭据失败会明确报告未完成 |
-| 更新项目文档 | `update project docs` | 写入当前进度与交接检查点，不执行全天收尾 |
-| 保存设计规范 | `save design spec` | 保存用户已确认的设计事实，供后续 UI 任务引用 |
-| 这个坑记下来 | `remember this pitfall` | 把已验证坑点写入长期记忆与索引 |
-| 这个决策记下来 | `record this decision` | 保存技术决策、取舍与验证边界 |
-| Baton init | `Baton init` | 初始化项目记忆、配置和三端适配器 |
-| 检查更新 | `check update` | 只读比较本机版本锚与 GitHub/npm 最新版 |
-| 更新 Baton | `update baton` | 经确认后更新安装源并重跑安装，再核对版本 |
+这些都发到 **AI 聊天框**，不是终端。
 
-<a id="truth-and-capabilities"></a>
-## 项目真相与能力边界
+| 你说 | Baton 会做什么 |
+|---|---|
+| <code>上班啦</code> | 检查 Git、读取交接和任务，给出任务表 |
+| <code>继续工作</code> | 从上次唯一下一步继续，不从头考古 |
+| <code>完成</code> | 把任务转为待验收；你确认后才算已完成 |
+| <code>更新项目文档</code> | 保存当前进度和交接，不做全天收尾 |
+| <code>这个坑记下来</code> | 把已验证的坑写进长期记忆 |
+| <code>这个决策记下来</code> | 保存技术决策和取舍 |
+| <code>下班啦</code> | 验证、记录、提交、推送，并核对远端 SHA |
+| <code>检查更新</code> | 只读检查 Baton 是否有新版 |
+| <code>更新 Baton</code> | 经确认后更新，并核对是否真的生效 |
 
-### 项目级安装会创建什么
+英文环境可以使用 <code>clock in</code>、<code>continue work</code>、<code>complete task</code>、<code>clock out</code> 等对应口令。
 
-```text
+## 换电脑或换 AI
+
+### 换 AI，不换项目
+
+直接用另一个 AI 打开同一个项目，然后说：
+
+~~~text
+继续工作
+~~~
+
+Codex、Cursor、Claude Code 会读取项目里的 Skill 和 <code>docs/ai_memory/</code>。DSH 还要求当前电脑的对应 profile 已安装插件。
+
+### 换电脑
+
+1. 在新电脑安装 Git 和你要用的 AI。
+2. <code>git clone</code> **你自己的项目**。
+3. 用 AI 打开项目，说“上班啦”或“继续工作”。
+
+这里 clone 的是你的项目，不是 Baton 安装仓库。<br>
+如果新电脑还没有用户级 Skill，可重做第 1 步；DSH 必须在新电脑重新安装 profile 插件。
+
+## 项目里会多出什么？
+
+~~~text
 你的项目/
-├── AGENTS.md                       # Codex 入口段
-├── CLAUDE.md                       # Claude Code 入口段
+├── AGENTS.md                       # Codex 入口
+├── CLAUDE.md                       # Claude Code 入口
 ├── .cursorrules                    # Cursor 兼容入口
-├── .agents/skills/baton/           # Codex 项目 Skill 镜像
-├── .claude/skills/baton/           # Claude Code 项目 Skill 镜像
-├── .cursor/skills/baton/           # Cursor 项目 Skill 镜像
+├── .agents/skills/baton/           # Codex 项目 Skill
+├── .claude/skills/baton/           # Claude Code 项目 Skill
+├── .cursor/skills/baton/           # Cursor 项目 Skill
 ├── .cursor/rules/baton.mdc         # Cursor 现代规则
-├── docs/ai_memory/                 # 随 Git 同步的长期项目真相
-│   ├── current.md
-│   ├── handoff_current.md
-│   ├── overview.md
-│   ├── state/
-│   ├── tasks/
-│   ├── knowledge/
-│   └── ui_spec/
+├── docs/ai_memory/                 # 会跟 Git 走的长期项目记忆
 └── .baton/
-    ├── config.json                 # 例外：应入 Git，保存项目门禁与路由配置
-    ├── version.json                # 本机版本锚，忽略
-    ├── manifest.json               # managed 文件 hash，应入 Git，供跨机安全卸载
-    └── local/                      # 本机指标与临时证据，忽略
-```
+    ├── config.json                 # 入 Git：项目门禁与路由配置
+    ├── manifest.json               # 入 Git：安装器管理文件清单
+    ├── version.json                # 不入 Git：本机版本锚
+    └── local/                      # 不入 Git：本机临时数据
+~~~
 
-`.baton/` 不是“整个目录都不入库”。真实规则是：`config.json` 与 `manifest.json` 入库；`version.json`、`local/`、私有扫描清单等本机文件通过 `.gitignore` 忽略。
+重点：<code>.baton/</code> 不是整个目录都忽略。<code>config.json</code> 和 <code>manifest.json</code> 应进入 Git；<code>version.json</code>、<code>local/</code> 和私有扫描清单不进入 Git。
 
-### 四个宿主的能力差异
+## 四个宿主并不是完全一样
 
 | 能力 | Codex / Cursor / Claude Code | DeepSeek Harness |
 |---|---|---|
-| 项目记忆、任务、交接、设计规范 | 通过 Skill + Markdown/JSON | 同一套项目文件 |
-| Git 同步与远端 SHA 核验 | AI 按 Skill 调用宿主命令；受权限、网络、凭据影响 | 原生工具编排，仍受网络和凭据影响 |
-| `baton_*` 原生工具 | 无；按无插件流程执行 | 有，当前组合包提供 19 个 |
-| 单写入者锁 | 文件/Git 级规则约束，无法声称宿主级原子保证 | 插件可提供更强机械门禁 |
-| 用户授权回执、实际模型身份 | 取决于宿主是否暴露；无法确认时必须记 unknown | 插件可使用 DSH 宿主事件与授权服务 |
-| 子 Agent / 模型路由 | 只使用当前宿主真实提供的能力，不跨宿主硬塞模型名 | 只使用已配置且已验证的 DSH provider/model |
+| 项目记忆、任务、交接 | Skill + Markdown/JSON | 同一套项目文件 |
+| Git 操作 | AI 按 Skill 调用宿主命令 | 原生工具编排 |
+| <code>baton_*</code> 原生工具 | 没有，按 Skill 做等价流程 | 有，当前组合包提供 19 个 |
+| 单写入者保护 | 文件/Git 级规则，不能冒充原子锁 | 插件可提供更强机械门禁 |
+| 实际模型与授权证据 | 宿主不提供时如实记 <code>unknown</code> | 可使用 DSH 宿主事件与授权服务 |
 
-所以，“功能流程通用”不等于“四个宿主的机械保证完全相同”。
+共同点是项目记忆和工作流程；不同点是自动化和机械保证。Baton 不会假装四个平台底层能力一模一样。
 
-<a id="maintenance"></a>
-## 更新、卸载与排错
+## 更新与卸载
 
-### 更新 Baton
+### 更新
 
-最简单的方式是对 AI 说：
+最省心：在 AI 聊天框说 <code>检查更新</code>。确认有新版后再说 <code>更新 Baton</code>。
 
-```text
-检查更新
-```
+想自己更新也可以在终端运行：
 
-检查更新是只读操作。确认有新版后再说“更新 Baton”。Codex、Cursor、Claude Code 会更新 `$HOME/Baton` 并重跑对应安装；DSH 会更新 profile 内的 npm 组合包。更新后新建会话或重启 DSH profile。
+~~~powershell
+git -C "$HOME/Baton" pull --ff-only
+& "$HOME/Baton/scripts/baton-install.ps1" -Scope User
+~~~
 
-你也可以直接重跑本 README 中对应的用户级或项目级安装命令；命令只允许 `ff-only` 更新 Baton 源仓。
+更新后新建 AI 会话；DSH 更新插件后重启对应 profile。
 
 ### 项目级安全卸载
 
 先演练，不写文件：
 
-```powershell
-$baton = Join-Path $HOME 'Baton'; & (Join-Path $baton 'scripts\baton-uninstall.ps1') -ProjectRoot 'C:\你的项目路径' -DryRun
-```
+~~~powershell
+& "$HOME/Baton/scripts/baton-uninstall.ps1" -ProjectRoot "C:\你的项目路径" -DryRun
+~~~
 
-确认输出后，去掉 `-DryRun` 执行。默认保留 `docs/ai_memory/` 与 `.baton/config.json`；只有显式加 `-RemoveMemory` 才会删除项目真相。安装后被你修改过的 managed 文件会因 hash 不一致而保留。
+确认输出后去掉 <code>-DryRun</code>。默认保留 <code>docs/ai_memory/</code> 与 <code>.baton/config.json</code>；只有显式加 <code>-RemoveMemory</code> 才会删除项目记忆。
 
-当前卸载脚本只处理**项目级**文件，不会删除用户级全局 Skill。要移除用户级安装，只删除以下三个根目录中名为 `baton`、`baton-lean-review`、`baton-debt`、`baton-doctor` 的子目录；不要删除整个 `skills` 目录：
+当前卸载脚本只处理项目级文件，不会删除用户级 Skill。删除用户级安装时，只删除下面三个根目录里的 <code>baton</code>、<code>baton-lean-review</code>、<code>baton-debt</code>、<code>baton-doctor</code> 子目录，别把整个 <code>skills</code> 文件夹一锅端：
 
-- `~/.agents/skills/`
-- `~/.cursor/skills/`
-- `~/.claude/skills/`
+- <code>~/.agents/skills/</code>
+- <code>~/.cursor/skills/</code>
+- <code>~/.claude/skills/</code>
 
 DSH profile 卸载：
 
-```powershell
+~~~powershell
 dsh plugin --profile web remove @kakadeka/dsh-baton
-```
+~~~
 
-### 常见问题
+## 卡住了？先看这里
 
-#### 报错：`baton-install.ps1 is not recognized` / `脚本文件不存在`
+### <code>git clone</code> 说 <code>$HOME/Baton</code> 已存在
 
-你执行的是旧版、只调用脚本的命令，但 `$HOME/Baton` 尚未下载。请回到对应 AI 章节，复制包含 `git clone` 的完整自举命令。
+说明以前下载过。不要重复 clone，运行更新命令：
 
-#### 报错：`pwsh` 不是命令
+~~~powershell
+git -C "$HOME/Baton" pull --ff-only
+~~~
 
-- Windows：直接打开系统自带 PowerShell，使用本 README 中以 `$baton = ...` 开头的命令；它不要求 `pwsh`。
-- macOS / Linux：安装 PowerShell 7 后进入 `pwsh` 再运行命令。
+如果它不是 Git 仓库，先确认里面有没有重要文件，再手动改名。Baton 不会替你覆盖它。
 
-#### `$HOME/Baton` 已存在但不是 Git 仓库
+### <code>baton-install.ps1</code> 不存在
 
-命令会主动停止，避免覆盖同名目录。把该目录改名或移走后重试。
+通常是第 1 步的 <code>git clone</code> 没成功。先看终端上方的 Git 报错，不要直接跳到第二行。
 
-#### 安装成功，但说“上班啦”没有反应
+### macOS / Linux 提示 <code>pwsh</code> 不存在
+
+先安装 PowerShell 7，再进入 <code>pwsh</code> 执行教程里的 PowerShell 命令。
+
+### 安装成功，但 <code>Baton init</code> 没反应
 
 1. 新建 AI 会话或重启 DSH profile。
-2. 检查与你的 AI 对应的 `SKILL.md` 是否存在。
-3. 检查项目是否做过项目级安装，是否有 `docs/ai_memory/`。
-4. 检查项目是否有可读取的 Git HEAD；新仓库需要首次提交。
-5. 对 AI 明确说“请按 Baton skill 执行上班啦”，观察它是否报告 Skill 未加载或权限不足。
+2. 检查对应的用户级 <code>SKILL.md</code> 是否存在。
+3. 确认 AI 打开的是你的项目目录，不是 <code>$HOME/Baton</code> 安装目录。
+4. 明确告诉 AI：“请按 Baton skill 执行 <code>Baton init</code>。”
 
-#### `git pull --ff-only` 报分叉或无法快进
+### <code>git pull --ff-only</code> 说无法快进
 
-命令会停止，不会 rebase、reset 或覆盖本地修改。先查看 `$HOME/Baton` 的 `git status` 和分支差异，再决定如何处理；不要为了安装强行 `reset --hard`。
+Baton 会停下来，不会偷偷 rebase、reset 或覆盖修改。先运行：
 
-#### 下班时没有 push 成功
+~~~powershell
+git -C "$HOME/Baton" status
+~~~
 
-Baton 只有在 `git push` 成功并且远端 SHA 与本地 HEAD 一致时才应报告“下班完成”。网络、权限、凭据或分支保护失败时，正确结果是明确报告未完成，而不是假装成功。
+看清楚差异后再决定，不要为了更新安装器直接 <code>reset --hard</code>。
 
-## 安全原则
+### “下班啦”但没有 push 成功
 
-- 禁止 force push、`reset --hard`、危险 `clean` 和未授权 rebase。
-- 同步只允许 `ff-only`；分叉时停止并报告。
-- API Key、Token、密码和私钥不得写入 Git、项目记忆、报表或交接。
-- 历史记录只追加，或明确标记“已取代”；不静默覆盖旧决策。
-- 任务范围、受保护路径、验证证据与远端 SHA 必须以真实文件和命令输出为准。
-- 非 DSH 宿主的机械保证会按平台能力降级，README 与 AI 都不应把规则约束宣传成插件级原子保证。
+只有 <code>git push</code> 成功，而且远端 SHA 等于本地 HEAD，Baton 才应该报告“下班完成”。网络、权限或分支保护失败时，正确答案就是“还没完成”，不许演。
+
+## 安全底线
+
+- 不 force push，不 <code>reset --hard</code>，不危险 <code>clean</code>，不偷偷 rebase。
+- 同步默认只允许 <code>ff-only</code>；遇到分叉先停。
+- API Key、Token、密码和私钥不写进 Git、项目记忆、报表或交接。
+- 历史只追加，或者明确标记“已取代”。
+- 公开仓库只包含 Baton 运行所需文件，不包含你项目里的 <code>docs/ai_memory/</code>。
 
 ## 仓库与许可证
 
@@ -417,4 +392,4 @@ Baton 只有在 `git push` 成功并且远端 SHA 与本地 HEAD 一致时才应
 - npm：[@kakadeka/dsh-baton](https://www.npmjs.com/package/@kakadeka/dsh-baton)
 - License：[Apache-2.0](./LICENSE)
 
-公开仓库只包含运行 Baton 所需的发布面。项目自己的 `docs/ai_memory/`、内部计划、会话记录与凭据不属于公开包。
+**Pass your project, not your context.** 🥁
