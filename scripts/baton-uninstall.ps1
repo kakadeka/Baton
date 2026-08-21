@@ -1,4 +1,4 @@
-# baton-uninstall.ps1 —— Baton 安全卸载
+﻿# baton-uninstall.ps1 —— Baton 安全卸载
 # 用法: pwsh -File baton-uninstall.ps1 -ProjectRoot <项目根目录> [-DryRun] [-RemoveMemory]
 # 原则:
 #   1) 只移除确认属于 Baton 的内容：SKILL 镜像（内容含 "name: baton" 才删）、入口文件的成对 marker 段（段外内容保留）、版本锚；

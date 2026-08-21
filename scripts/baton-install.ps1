@@ -1,4 +1,4 @@
-# baton-install.ps1 —— Baton 一键安装（用户级 / 项目级）
+﻿# baton-install.ps1 —— Baton 一键安装（用户级 / 项目级）
 # ------------------------------------------------------------------
 # 用法（两种装法二选一）：
 #
@@ -106,7 +106,7 @@ if ($Scope -eq 'User') {
     Write-Host "用户级安装完成。接下来："
     Write-Host "  1) 在任何项目里说口令即可（skill 已全局生效，AI 会自动找到）"
     Write-Host "  2) 想让某个具体项目被所有电脑/AI 认识，再对该项目跑项目级安装："
-    Write-Host "     pwsh -File baton-install.ps1 -Scope Project -ProjectRoot C:\项目路径"
+    Write-Host ('     & "' + $PSCommandPath + '" -Scope Project -ProjectRoot C:\项目路径')
   }
   exit 0
 }
