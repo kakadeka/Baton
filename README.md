@@ -1,4 +1,9 @@
+<!-- baton-src: README.zh-CN.md sha256:006619d43e2e status:current -->
 # 🥁 Baton — Pass your project, not your context.
+
+<p align="center">
+  <img src="./gittop.png" alt="Baton — Pass your project, not your context" width="100%">
+</p>
 
 <h2 align="center">Switch computers, switch AI, switch sessions — and keep working with one sentence.</h2>
 
@@ -16,6 +21,10 @@
   <img src="https://img.shields.io/badge/pwsh-5.1%2B-5391FE?logo=powershell&logoColor=white" alt="pwsh">
   <img src="https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white" alt="DSH plugin">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="platform">
+</p>
+
+<p align="center">
+  <a href="README.zh-CN.md">简体中文</a> · <strong>English</strong>
 </p>
 
 **Baton is a project-relay collaboration system.** It lets Claude Code, Codex, Cursor, and DeepSeek Harness take turns maintaining the **same project** across machines — progress, memory, design specs, tasks, and Git stay consistent. **You talk normally; it does the rest.**
@@ -58,13 +67,13 @@ dsh plugin --profile web add @kakadeka/dsh-baton
 | 6 | Multiple todos; AI shouldn't decide priority; typing full tasks is tedious | Task table with numbers — reply `1`/`2`/`3` |
 | 7 | Long project, history unreachable; re-reading everything burns tokens | Decisions/pitfalls/specs auto-indexed; **query the index, read only the hit fragment** |
 | 8 | Codex/Claude/Cursor relay without knowing what the last one did | Unified handoff file — branch/HEAD/changes/constraints/next-step. Read the last entry, continue |
-| 9 | Expensive model used for everything; weak model makes mistakes; manual switching is painful | Auto model routing by task difficulty — micro: main session, normal: flash, complex/review: pro, with fallback chains |
-| 10 | "Which model actually ran?" bills don't match | recommended vs actual recorded separately, source labeled honestly (dispatch record / host descriptor / unknown) |
+| 9 | Expensive model used for everything; weak model makes mistakes; manual switching is painful | Detect the current AI host first, then use only that host's available main session, subagents, and model tiers — never inject another host's model names |
+| 10 | "Which model actually ran?" bills don't match | recommended vs actual are separate; inferred values show their basis, confidence, and estimated status instead of pretending to be host evidence |
 | 11 | AI drifts from prototype after hours of work | Frozen requirements + allowed/protected paths + mechanical scope checks + independent review + no dangerous git |
 | 12 | Changing a button color took an hour | Micro fast path — no delegation, no reviewer, no irrelevant tests. Simple tasks take minutes |
 | 13 | Complex tasks must not be written sloppily | Escalating gates: contract, strong model, independent reviewer, fidelity vs frozen spec, rollback plan |
 | 14 | Office and home machines out of sync; fear of losing local work | Safe fetch + ff-only sync (never overwrites), auto commit/push, remote SHA verify; force/reset/clean forbidden |
-| 15 | Picking models by feel, no real data | Every task records actual model and completion → monthly dashboard; success/failure/duration not yet collected are shown as "not recorded", never fabricated |
+| 15 | Picking models by feel, no real data | The monthly dashboard prioritizes real events; missing values may use clearly labeled ranges derived from task metadata, and estimated samples can be excluded with one switch |
 | 16 | Reuse/share the system with a new project | Framework and project instance fully separated; `Baton init` one-shot bootstrap; share via sanitizing pipeline (no keys/paths/private notes) |
 | 17 | Other skills installed that bypass project rules | External skills may help, but project boundaries (paths, design specs, git discipline) are enforced by Baton, coordinated with AGENTS.md |
 
@@ -75,8 +84,8 @@ dsh plugin --profile web add @kakadeka/dsh-baton
 - **Long-term memory** — decisions/pitfalls/specs auto-archived + lightweight index; progressive reads, no full re-reads
 - **Anti-drift** — FROZEN constraints + allowed/protected path checks + forbidden-change list + independent review + no dangerous git
 - **Git truth loop** — ff-only sync, auto commit/push, **remote SHA == local HEAD**, publish record (`last_published_sha`)
-- **Auto model routing** — task tier × rule table (flash/pro + high/max + fallback); recommended vs actual recorded transparently
-- **Monthly dashboard** — model rankings / hourly activity / daily detail / agent detail, from real execution data
+- **Host-isolated agent routing** — detect Codex / Claude Code / Cursor / DSH first, then use only that host's native main session, subagents, and model tiers; DSH never receives Sol/Luna and Codex never receives DSH model IDs
+- **Monthly dashboard** — date panel / SVG trend line / model rankings / daily and agent detail; facts first, with labeled ranges and confidence for missing values and a switch to exclude estimates
 - **One-click acceptance** — `baton_accept`: skeleton/state/security/volume checks → PASS/FAIL + blocking list
 - **Lean implementation gate** — per-task `implementation_policy` (`off`/`lite`/`full`/`strict`): in strict mode new dependencies/files/abstractions are budgeted mechanically and over-budget closeout is blocked until the user confirms an exception
 - **Specialist skills** — `lean-review` (over-engineering audit), `debt` (tech-debt scan), `doctor` (health check: version/drift/lock/publish surface) — all read-only, installed alongside the main skill

@@ -15,8 +15,8 @@
     "ff_only": true
   },
   "model_pool": [
-    { "id": "deepseek-v4-flash", "provider": "deepseek", "tags": ["fast", "cheap"], "status": "unverified" },
-    { "id": "deepseek-v4-pro", "provider": "deepseek", "tags": ["reasoning", "review"], "status": "unverified" }
+    { "id": "deepseek-v4-flash", "provider": "deepseek", "host_id": "dsh", "tags": ["fast", "cheap"], "status": "unverified" },
+    { "id": "deepseek-v4-pro", "provider": "deepseek", "host_id": "dsh", "tags": ["reasoning", "review"], "status": "unverified" }
   ],
   "routing": [
     { "task": "micro", "mode": "main-session" },

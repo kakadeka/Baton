@@ -211,6 +211,111 @@ export function apply(ctx) {
       return { ok: true, existing: event, appended: true }
     }
 
+    function metricRawKey(raw) {
+      try {
+        const row = JSON.parse(raw)
+        if (row !== null && typeof row === 'object' && typeof row.event_id === 'string' && row.event_id !== '') return 'event:' + row.event_id
+      } catch (e) { /* 旧的无效行按原文去重并保留 */ }
+      return 'raw:' + raw
+    }
+
+    function absoluteAt(rootPath, rel) {
+      const sep = rootPath.indexOf('\\') !== -1 ? '\\' : '/'
+      return rootPath.replace(/[\\\/]+$/, '') + sep + rel.replace(/\//g, sep)
+    }
+
+    async function consolidateMetricJournal(rootPath) {
+      const today = todayLocal()
+      const currentMonth = monthLocal()
+      const localRels = []
+      try {
+        const localDir = await fs.resolve('.baton/local/metrics', { cwd: rootPath })
+        for (const entry of await fs.listDir(localDir)) {
+          if (entry.type === 'file' && /\.jsonl$/i.test(entry.name || '')) localRels.push('.baton/local/metrics/' + entry.name)
+        }
+      } catch (e) { /* 尚无本机 metrics */ }
+
+      const grouped = new Map()
+      for (const rel of localRels) {
+        const content = (await readTextAt(rootPath, rel)) || ''
+        for (const raw of content.split('\n').filter((line) => line.trim() !== '')) {
+          let eventMonth = currentMonth
+          try {
+            const row = JSON.parse(raw)
+            eventMonth = east8Stamp(row.ended_at || row.started_at || row.ts).date.slice(0, 7).replace('-', '/')
+          } catch (e) { /* 无效旧行归当前月并原样保留 */ }
+          if (!grouped.has(eventMonth)) grouped.set(eventMonth, [])
+          grouped.get(eventMonth).push(raw)
+        }
+      }
+
+      const targetMonths = new Set([currentMonth].concat(Array.from(grouped.keys())))
+      const monthRaw = new Map()
+      let appended = 0
+      for (const targetMonth of targetMonths) {
+        const runsRel = 'docs/ai_memory/agent_metrics/' + targetMonth + '/runs.jsonl'
+        const before = (await readTextAt(rootPath, runsRel)) || ''
+        const existing = new Map()
+        for (const raw of before.split('\n').filter((line) => line.trim() !== '')) existing.set(metricRawKey(raw), raw)
+        const additions = []
+        for (const raw of grouped.get(targetMonth) || []) {
+          const key = metricRawKey(raw)
+          if (existing.has(key)) {
+            if (key.indexOf('event:') === 0 && metricComparable(JSON.parse(existing.get(key))) !== metricComparable(JSON.parse(raw))) {
+              return { ok: false, status: 'conflict', conflict_event_id: key.slice(6), reason: 'metrics event_id 冲突：拒绝覆盖月度历史', local_files: localRels }
+            }
+            continue
+          }
+          existing.set(key, raw)
+          additions.push(raw)
+        }
+        const after = before + (additions.length > 0 ? additions.join('\n') + '\n' : '')
+        if (additions.length > 0) await writeTextRetry(rootPath, runsRel, after)
+        appended += additions.length
+        monthRaw.set(targetMonth, after)
+      }
+
+      // 月度历史已安全落盘后再清空工作缓存；崩溃重试依靠 event_id 去重。
+      for (const rel of localRels) await writeTextAt(rootPath, rel, '')
+
+      let currentStatus = 'missing'
+      let currentError = null
+      for (const targetMonth of targetMonths) {
+        const monthDir = 'docs/ai_memory/agent_metrics/' + targetMonth
+        const htmlRel = monthDir + '/index.html'
+        const oldHtml = (await readTextAt(rootPath, htmlRel)) || ''
+        try {
+          const reportToday = today.indexOf(targetMonth.replace('/', '-')) === 0 ? today : targetMonth.replace('/', '-') + '-01'
+          const html = await monthlyHtml(rootPath, monthDir, targetMonth, reportToday, {}, 'unknown', 'unknown', monthRaw.get(targetMonth) || '')
+          await writeTextRetry(rootPath, htmlRel, html)
+          const verified = (await readTextAt(rootPath, htmlRel)) || ''
+          if (!verified.startsWith('<!doctype html>') || verified.indexOf('</html>') === -1) throw new Error('生成文件完整性校验失败')
+          if (targetMonth === currentMonth) currentStatus = 'generated'
+        } catch (e) {
+          if (oldHtml.startsWith('<!doctype html>') && oldHtml.indexOf('</html>') !== -1) {
+            await writeTextRetry(rootPath, htmlRel, oldHtml)
+            if (targetMonth === currentMonth) currentStatus = 'old'
+          } else if (targetMonth === currentMonth) currentStatus = 'missing'
+          if (targetMonth === currentMonth) currentError = String(e && e.message ? e.message : e)
+        }
+      }
+
+      const htmlRel = 'docs/ai_memory/agent_metrics/' + currentMonth + '/index.html'
+      const htmlNow = (await readTextAt(rootPath, htmlRel)) || ''
+      const exists = htmlNow.startsWith('<!doctype html>') && htmlNow.indexOf('</html>') !== -1
+      const htmlAbsolute = exists ? absoluteAt(rootPath, htmlRel) : null
+      return {
+        ok: true,
+        today,
+        appended,
+        monthly_html: htmlRel,
+        monthly_html_absolute: htmlAbsolute,
+        monthly_html_status: currentStatus,
+        monthly_html_line: exists ? (currentStatus === 'old' ? '统计 HTML（旧版，本次未刷新）：' : '统计 HTML：') + htmlAbsolute : '统计 HTML：未生成（' + (currentError || '文件不存在或完整性校验失败') + '）',
+        local_files: localRels,
+      }
+    }
+
     function parseNullableCount(value, field) {
       const s = value === undefined || value === null ? '' : String(value).trim()
       if (s === '') return { ok: true, value: null }
@@ -1524,12 +1629,12 @@ export function apply(ctx) {
     ctx.tools.register(defineTool({
       name: 'baton_select',
       description: 'Baton：「数字确认」持久化闭环：选择任务并建立 FROZEN/BOUNDED/OPEN 契约。FROZEN/BOUNDED 必须预锁 allowed_paths；OPEN 与 Lean 例外必须由 DSH ctx.approval 当次一次性授权。',
-      parameters: simple({ path: '项目根目录', number: '任务表编号（clock_in 返回的 1 起始编号）', contract_level: '必填：FROZEN | BOUNDED | OPEN', allowed_paths: 'FROZEN/BOUNDED 必填：本任务允许改动的相对路径前缀，逗号分隔', open_reason: 'OPEN 必填：需要开放契约的具体原因', task_type: '任务类型（可选，由 AI 自动判断）：micro | bounded | complex | architecture | high_risk | review', implementation_policy: 'Lean Gate 策略（可选显式覆盖）：off | lite | full | strict；省略时按任务类型自动选择', reuse_candidates: '复用搜索结果，逗号分隔（full/strict 必填：已查到的可复用 helper/模式）', native_candidates: 'stdlib/native/已装依赖检查结果，逗号分隔（full/strict 必填）', minimum_check: '最小实现检查 test/evidence id（full/strict 必填）', dependency_budget: '新增依赖预算（可选自然数；strict 超限阻断）', new_file_budget: '新增文件预算（可选自然数；strict 超限阻断）', abstraction_budget: '新增抽象预算（可选自然数；strict 超限阻断）', lean_exceptions: '需宿主一次性授权的精确例外 JSON 数组（可选）：[{"kind":"dependency|new_file|abstraction","match":"名称或路径"}]' }),
+      parameters: simple({ path: '项目根目录', number: '任务表编号或组合编号（如 1、1,2,3、1234）', contract_level: '必填：FROZEN | BOUNDED | OPEN', allowed_paths: 'FROZEN/BOUNDED 必填：本任务允许改动的相对路径前缀，逗号分隔', open_reason: 'OPEN 必填：需要开放契约的具体原因', task_type: '任务类型（可选，由 AI 自动判断）：micro | bounded | complex | architecture | high_risk | review', implementation_policy: 'Lean Gate 策略（可选显式覆盖）：off | lite | full | strict；省略时按任务类型自动选择', reuse_candidates: '复用搜索结果，逗号分隔（full/strict 必填：已查到的可复用 helper/模式）', native_candidates: 'stdlib/native/已装依赖检查结果，逗号分隔（full/strict 必填）', minimum_check: '最小实现检查 test/evidence id（full/strict 必填）', dependency_budget: '新增依赖预算（可选自然数；strict 超限阻断）', new_file_budget: '新增文件预算（可选自然数；strict 超限阻断）', abstraction_budget: '新增抽象预算（可选自然数；strict 超限阻断）', lean_exceptions: '需宿主一次性授权的精确例外 JSON 数组（可选）：[{"kind":"dependency|new_file|abstraction","match":"名称或路径"}]' }),
       output: output(),
       async execute(args, exec) {
         const rootPath = await rootOf(args)
-        const num = Number(args.number)
-        if (!Number.isInteger(num) || num < 1) return { ok: false, reason: 'number 必须是正整数（任务表编号）' }
+        const rawNumber = String(args.number === undefined || args.number === null ? '' : args.number).trim()
+        if (!/^\d+(?:[,+\s]+\d+)*$/.test(rawNumber)) return { ok: false, reason: 'number 必须是正整数或组合编号（如 1、1,2,3、1234）' }
         const contractLevel = String(args.contract_level || '').trim().toUpperCase()
         if (['FROZEN', 'BOUNDED', 'OPEN'].indexOf(contractLevel) === -1) return { ok: false, reason: 'contract_level 必填，只允许 FROZEN|BOUNDED|OPEN；禁止默认推断契约范围' }
         const openReason = String(args.open_reason || '').trim()
@@ -1542,17 +1647,21 @@ export function apply(ctx) {
         const normPaths = allowedPaths.map((p) => p.replace(/\/+$/, ''))
         if (contractLevel !== 'OPEN' && normPaths.length === 0) return { ok: false, reason: contractLevel + ' 契约必须提供非空 allowed_paths' }
         if (contractLevel === 'OPEN' && openReason === '') return { ok: false, reason: 'OPEN 契约必须提供非空 open_reason，并取得宿主一次性授权' }
-        return opEnvelope(rootPath, 'select:' + num + ':' + contractLevel + ':' + normPaths.join('|').slice(0, 80), async () => {
+        return opEnvelope(rootPath, 'select:' + rawNumber + ':' + contractLevel + ':' + normPaths.join('|').slice(0, 80), async () => {
           const ownGate = await ownershipGuard(rootPath)
         if (!ownGate.pass) return { ok: false, reason: '未持有单写入者锁：' + ownGate.reason }
         const tasks = await assertJsonHealthy(rootPath, 'docs/ai_memory/state/tasks.json', { tasks: [] })
         const open = (tasks.tasks || []).filter((t) => t.status !== 'completed' && t.status !== 'cancelled' && t.status !== 'awaiting_acceptance')
-        const task = open[num - 1]
-        if (task === undefined) return { ok: false, reason: '编号越界：当前开放任务 ' + open.length + ' 个', available: open.map((t, i) => ({ number: i + 1, task_id: t.id, title: t.title })) }
-        if (task.status !== 'in_progress') task.status = 'in_progress'
-        task.phase = '进行中'
-        task.updated_at = nowIso()
-        if (normPaths.length > 0) task.allowed_paths = normPaths
+        let selectionNumbers
+        if (/[,+\s]/.test(rawNumber)) selectionNumbers = rawNumber.split(/[,+\s]+/).filter(Boolean).map(Number)
+        else {
+          const exact = Number(rawNumber)
+          selectionNumbers = exact <= open.length ? [exact] : rawNumber.split('').map(Number)
+        }
+        selectionNumbers = [...new Set(selectionNumbers)]
+        if (selectionNumbers.length === 0 || selectionNumbers.some((n) => !Number.isInteger(n) || n < 1 || n > open.length)) return { ok: false, reason: '编号越界：当前开放任务 ' + open.length + ' 个', available: open.map((t, i) => ({ number: i + 1, task_id: t.id, title: t.title })) }
+        const selectedTasks = selectionNumbers.map((n) => open[n - 1])
+        const task = selectedTasks[0]
         // Lean Gate 策略：用户不需要选择内部档位。省略时按 AI 判定的任务类型自动采用：
         // micro/review=off，普通 bounded=lite，complex/architecture/high_risk=full；strict 仅显式启用。
         const policy = (args.implementation_policy || '').trim()
@@ -1615,15 +1724,22 @@ export function apply(ctx) {
           native_candidates: native.length > 0 ? native : undefined,
           lean_exceptions: leanExceptions.length > 0 ? leanExceptions : undefined,
         }
-        if (effPolicy !== undefined) {
-          task.implementation_policy = effPolicy
-          task.lean_contract = leanContract
+        for (const selectedTask of selectedTasks) {
+          if (selectedTask.status !== 'in_progress') selectedTask.status = 'in_progress'
+          selectedTask.phase = '进行中'
+          selectedTask.updated_at = nowIso()
+          if (normPaths.length > 0) selectedTask.allowed_paths = normPaths
+          if (effPolicy !== undefined) {
+            selectedTask.implementation_policy = effPolicy
+            selectedTask.lean_contract = leanContract
+          }
+          selectedTask.contract_level = contractLevel
+          selectedTask.allowed_paths = contractLevel === 'OPEN' ? (normPaths.length > 0 ? normPaths : undefined) : normPaths
+          selectedTask.open_reason = contractLevel === 'OPEN' ? openReason : undefined
         }
-        task.contract_level = contractLevel
-        task.allowed_paths = contractLevel === 'OPEN' ? (normPaths.length > 0 ? normPaths : undefined) : normPaths
-        task.open_reason = contractLevel === 'OPEN' ? openReason : undefined
         tasks.current_task_id = task.id
-        tasks.active_work = { task_id: task.id, title: task.title, phase: '进行中', selected_at: nowIso(), selected_by: '编号 ' + num, contract_level: contractLevel, allowed_paths: task.allowed_paths || null }
+        tasks.selection_queue = selectedTasks.map((t) => t.id)
+        tasks.active_work = { task_id: task.id, title: task.title, queued_task_ids: selectedTasks.slice(1).map((t) => t.id), phase: '进行中', selected_at: nowIso(), selected_by: '编号 ' + selectionNumbers.join(','), contract_level: contractLevel, allowed_paths: task.allowed_paths || null }
         tasks.revision = (tasks.revision || 0) + 1
         // 预锁防篡改快照：锁定的允许范围写进机器状态 state.contract，
         // 收尾以快照为准——执行者事后改 tasks.json 的 allowed_paths 无法放大预锁范围。
@@ -1649,20 +1765,20 @@ export function apply(ctx) {
         stDoc.updated_at = nowIso()
         await writeTextAt(rootPath, 'docs/ai_memory/state/project_state.json', JSON.stringify(stDoc, null, 2))
         await writeTextAt(rootPath, 'docs/ai_memory/state/tasks.json', JSON.stringify(tasks, null, 2))
-        await removeTaskRow(rootPath, 'docs/ai_memory/tasks/task_todo.md', task.id)
+        for (const selectedTask of selectedTasks) await removeTaskRow(rootPath, 'docs/ai_memory/tasks/task_todo.md', selectedTask.id)
         const cell = (s) => String(s === undefined || s === null ? '' : s).replace(/\|/g, '\\|').trim()
-        const row = '| ' + cell(task.risk_level || 'normal') + ' | ' + task.id + ' | ' + cell(task.title) + ' | 进行中 | 已选定 | ' + cell(task.next_step || '') + ' |\n'
         const prog = (await readTextAt(rootPath, 'docs/ai_memory/tasks/task_progress.md')) || ''
-        if (prog.indexOf('| ' + task.id + ' |') === -1) {
+        const rowsToAdd = selectedTasks.filter((t) => prog.indexOf('| ' + t.id + ' |') === -1).map((t) => '| ' + cell(t.risk_level || 'normal') + ' | ' + t.id + ' | ' + cell(t.title) + ' | 进行中 | 已选定 | ' + cell(t.next_step || '') + ' |\n').join('')
+        if (rowsToAdd !== '') {
           const tablePos = prog.lastIndexOf('|---')
           if (tablePos !== -1) {
             const lineEnd = prog.indexOf('\n', tablePos)
             const at = lineEnd === -1 ? prog.length : lineEnd + 1
-            await writeTextAt(rootPath, 'docs/ai_memory/tasks/task_progress.md', prog.slice(0, at) + row + prog.slice(at))
+            await writeTextAt(rootPath, 'docs/ai_memory/tasks/task_progress.md', prog.slice(0, at) + rowsToAdd + prog.slice(at))
           }
         }
-        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_progress.md', '选定任务：' + task.id + ' ' + (task.title || ''), agentLabel(args))
-        return { ok: true, selected: task.id, title: task.title, task_type: taskType, implementation_policy: effPolicy, contract_level: contractLevel, next_step: task.next_step || null, note: '已持久化为当前任务；执行完成后用 baton_complete(task_id=' + task.id + ') 收尾' }
+        await appendRevision(rootPath, 'docs/ai_memory/tasks/task_progress.md', '选定任务：' + selectedTasks.map((t) => t.id + ' ' + (t.title || '')).join('；'), agentLabel(args))
+        return { ok: true, selected: task.id, selected_tasks: selectedTasks.map((t) => t.id), selection_queue: selectedTasks.map((t) => t.id), title: task.title, task_type: taskType, implementation_policy: effPolicy, contract_level: contractLevel, next_step: task.next_step || null, note: selectedTasks.length > 1 ? '已按编号顺序持久化任务队列；当前执行 ' + task.id + '，其余任务依次接续' : '已持久化为当前任务；执行完成后用 baton_complete(task_id=' + task.id + ') 收尾' }
         }, false)
       },
     }))
@@ -2271,7 +2387,8 @@ export function apply(ctx) {
           }
           await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '用户验收通过：' + taskId + ' ' + found.title, agentLabel(args))
           await appendTextAt(rootPath, '.baton/local/metrics/' + todayLocal() + '.jsonl',
-            JSON.stringify({ ts: nowIso(), type: 'task_accept', task_id: taskId, actual_model: (args.actual_model || 'unknown').trim() }) + '\n')
+            JSON.stringify({ ts: found.accepted_at, event_id: 'task_accept:' + taskId + ':' + found.accepted_at, type: 'task_accept', task_id: taskId, task_title: found.title, actual_model: (args.actual_model || 'unknown').trim() }) + '\n')
+          const metrics = await consolidateMetricJournal(rootPath)
           const open = (tasks.tasks || []).filter((t) => t.status !== 'completed' && t.status !== 'cancelled')
           return {
             ok: true,
@@ -2280,6 +2397,7 @@ export function apply(ctx) {
             next: (args.next || '无').trim(),
             remaining: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step || null })),
             note: '任务已验收完成（状态机终态）；下班时才 commit/push',
+            metrics,
           }
         }
         // —— finish 路径（默认）：置「待验收」——
@@ -2304,6 +2422,36 @@ export function apply(ctx) {
         found.next_step = (args.next || '无').trim()
         found.updated_at = nowIso()
         tasks.revision = (tasks.revision || 0) + 1
+        const queued = Array.isArray(tasks.selection_queue) ? tasks.selection_queue.filter((id) => id !== taskId) : []
+        const queuedNext = queued.map((id) => (tasks.tasks || []).find((t) => t.id === id)).find((t) => t && t.status !== 'completed' && t.status !== 'cancelled' && t.status !== 'awaiting_acceptance') || null
+        tasks.selection_queue = queuedNext === null ? [] : queued.slice(queued.indexOf(queuedNext.id))
+        if (tasks.current_task_id === taskId) {
+          if (queuedNext !== null) {
+            tasks.current_task_id = queuedNext.id
+            tasks.active_work = {
+              task_id: queuedNext.id,
+              title: queuedNext.title,
+              queued_task_ids: tasks.selection_queue.slice(1),
+              phase: '进行中',
+              selected_at: nowIso(),
+              selected_by: '组合队列自动推进',
+              contract_level: queuedNext.contract_level || null,
+              allowed_paths: queuedNext.allowed_paths || null,
+            }
+            const stDoc = await assertJsonHealthy(rootPath, 'docs/ai_memory/state/project_state.json', {})
+            if (stDoc.contract && stDoc.contract.task_id === taskId) {
+              stDoc.contract.task_id = queuedNext.id
+              stDoc.contract.locked_rev = tasks.revision
+              stDoc.contract.allowed_paths = queuedNext.allowed_paths || null
+              stDoc.revision = (stDoc.revision || 0) + 1
+              stDoc.updated_at = nowIso()
+              await writeTextAt(rootPath, 'docs/ai_memory/state/project_state.json', JSON.stringify(stDoc, null, 2))
+            }
+          } else {
+            tasks.current_task_id = null
+            tasks.active_work = null
+          }
+        }
         await writeTextAt(rootPath, 'docs/ai_memory/state/tasks.json', JSON.stringify(tasks, null, 2))
         await appendRevision(rootPath, 'docs/ai_memory/tasks/task_finished.md', '完成任务：' + found.title, agentLabel(args))
         await appendTextAt(rootPath, 'docs/ai_memory/tasks/task_finished.md',
@@ -2321,16 +2469,19 @@ export function apply(ctx) {
           path: 'docs/ai_memory/tasks/task_finished.md', line_start: null, updated_at: nowIso(),
         })
         await appendTextAt(rootPath, '.baton/local/metrics/' + todayLocal() + '.jsonl',
-          JSON.stringify({ ts: nowIso(), type: 'task_complete', task_id: taskId, actual_model: (args.actual_model || 'unknown').trim() }) + '\n')
+          JSON.stringify({ ts: found.updated_at, event_id: 'task_complete:' + taskId + ':' + found.updated_at, type: 'task_complete', task_id: taskId, task_title: found.title, actual_model: (args.actual_model || 'unknown').trim() }) + '\n')
+        const metrics = await consolidateMetricJournal(rootPath)
         const open = (tasks.tasks || []).filter((t) => t.status !== 'completed' && t.status !== 'cancelled')
         return {
           ok: true,
           completed: taskId,
           status: 'awaiting_acceptance',
           next: (args.next || '无').trim(),
+          next_queued_task: queuedNext === null ? null : { id: queuedNext.id, title: queuedNext.title, next_step: queuedNext.next_step || null },
           remaining: open.map((t) => ({ id: t.id, title: t.title, status: t.status, next_step: t.next_step || null })),
           warning: '任务已置「待验收」（用户未验收）：请按任务验收标准补齐证据（命令 → 结果）写入 task_finished 证据行；用户验收通过后调用 baton_complete(task_id=' + taskId + ', action=accept) 置完成',
-          note: '任务已关闭进入待验收；下班时才 commit/push',
+          note: queuedNext === null ? '任务已关闭进入待验收；下班时才 commit/push' : '任务已关闭进入待验收；组合队列已自动推进到 ' + queuedNext.id + '；下班时才 commit/push',
+          metrics,
         }
         }, false)
       },
@@ -2434,7 +2585,8 @@ export function apply(ctx) {
           '### ' + hoId(agent) + '｜中途存档｜' + saveTopic + '\n' +
           '- 时间：' + e8.display + '\n- 交接状态：检查点（不释放工作区）\n- 摘要：' + (args.summary || '') + '\n- 下一步：' + (args.next || ''),
           '中途存档｜' + saveTopic, agent)
-        return { ok: true, saved: true, note: '已存档；未 commit/push' }
+        const metrics = await consolidateMetricJournal(rootPath)
+        return { ok: true, saved: true, note: '已存档；未 commit/push', metrics }
         })
       },
     }))
@@ -2876,8 +3028,8 @@ export function apply(ctx) {
           }
           return hits
         }
-        // 导出只保留用户安装和运行 Baton 必需的文件；开发源码、测试、翻译、图片、CI 与维护脚本均不公开。
-        const copies = ['README.md', 'LICENSE', 'package.json', 'index.mjs', 'cordis.patch.yml', 'skills/baton/SKILL.md', 'skills/baton-lean-review/SKILL.md', 'skills/baton-debt/SKILL.md', 'skills/baton-doctor/SKILL.md', 'scripts/baton-install.ps1', 'scripts/baton-migrate.ps1', 'scripts/baton-sync.ps1', 'scripts/baton-uninstall.ps1', 'scripts/baton-report.mjs']
+        // 导出只保留用户安装和运行 Baton 必需的文件；中英根 README 都是公开运行时，历史翻译目录仍不导出。
+        const copies = ['README.md', 'README.zh-CN.md', 'LICENSE', 'package.json', 'index.mjs', 'cordis.patch.yml', 'skills/baton/SKILL.md', 'skills/baton-lean-review/SKILL.md', 'skills/baton-debt/SKILL.md', 'skills/baton-doctor/SKILL.md', 'scripts/baton-install.ps1', 'scripts/baton-migrate.ps1', 'scripts/baton-sync.ps1', 'scripts/baton-uninstall.ps1', 'scripts/baton-report.mjs']
         for (const dir of ['templates/ai_memory', 'templates/baton', 'templates/adapter']) {
           const t = await fs.resolve(dir, { cwd: rootPath })
           const entries = await fs.listDir(t).catch(() => [])
@@ -2972,23 +3124,29 @@ export function apply(ctx) {
 
     ctx.tools.register(defineTool({
       name: 'baton_route',
-      description: 'Baton：按任务类型与最近 30 天同宿主可信样本返回推荐执行模型，并追加 route_decided 事件。样本不足 5 次时使用 host-default，不自适应。',
-      parameters: simple({ path: '项目根目录', task_id: '任务 ID（必填）', task_type: 'micro | bounded | complex | architecture | high_risk | review' }),
+      description: 'Baton：按任务类型与最近 30 天同宿主可信样本返回推荐执行模型，并追加 route_decided 事件。只允许当前 DSH 宿主模型池，跨宿主请求 fail-closed。',
+      parameters: simple({ path: '项目根目录', task_id: '任务 ID（必填）', task_type: 'micro | bounded | complex | architecture | high_risk | review', host_id: '宿主 ID（可选；DSH 插件固定为 dsh）' }),
       output: output(),
       async execute(args) {
         const rootPath = await rootOf(args)
         const taskId = String(args.task_id || '').trim()
         if (!/^[A-Za-z0-9_\-]{1,64}$/.test(taskId)) return { ok: false, reason: 'task_id 必填，且只允许字母/数字/下划线/连字符（1-64 位）' }
         const type = (args.task_type || 'bounded').trim()
+        const hostId = String(args.host_id || 'dsh').trim().toLowerCase()
+        if (hostId !== 'dsh') return { ok: false, reason_code: 'host_mismatch', host_id: hostId, reason: 'host_mismatch：baton_route 当前运行于 dsh，只能从 DSH 已验证模型池分派；' + hostId + ' 必须使用其宿主原生子代理机制' }
         // B-01：route 纳入 operation envelope（只记 intent/failed/done 不短路——返回推荐数据给调用方）
         return opEnvelope(rootPath, 'route:' + taskId + ':' + type + ':' + todayLocal(), async () => {
           const ownGate = await ownershipGuard(rootPath)
           if (!ownGate.pass) return { ok: false, reason: '未持有单写入者锁：' + ownGate.reason }
           const config = await loadConfig(rootPath)
           const pool = (config && Array.isArray(config.model_pool)) ? config.model_pool : []
+          const eligiblePool = pool.filter((m) => {
+            const declaredHost = String(m.host_id || m.host || '').trim().toLowerCase()
+            return declaredHost === hostId
+          })
           const rows = (config && Array.isArray(config.routing)) ? config.routing : []
           const row = rows.find((r) => r.task === type) || { prefer: ['reasoning'], fallback: [], reasoning: 'high' }
-          const byTag = (tag) => pool.find((m) => (m.tags || []).indexOf(tag) !== -1 && m.status === 'verified')
+          const byTag = (tag) => eligiblePool.find((m) => (m.tags || []).indexOf(tag) !== -1 && m.status === 'verified')
           const toModel = (tag) => {
             const m = byTag(tag)
             return m ? { provider: m.provider || 'deepseek', model: m.id, reasoning: row.reasoning || 'high' } : null
@@ -3008,10 +3166,10 @@ export function apply(ctx) {
             if (prior !== undefined && prior.shape !== terminalShape) return { ok: false, reason: 'attempt_id ' + e.attempt_id + ' 存在冲突终态：拒绝用不一致历史做路由' }
             if (prior === undefined) terminalByAttempt.set(e.attempt_id, { shape: terminalShape, event: e })
           }
-          const samples = [...terminalByAttempt.values()].map((x) => x.event).filter((e) => e.host_id === 'dsh' && e.task_type === type && e.source === 'host_descriptor' && routeModelIds.has(e.actual_model) && Number.isFinite(Date.parse(e.ended_at || e.ts)) && Date.parse(e.ended_at || e.ts) >= cutoff && ['succeeded', 'needs_revision', 'failed'].indexOf(e.result) !== -1)
+          const samples = [...terminalByAttempt.values()].map((x) => x.event).filter((e) => e.host_id === hostId && e.task_type === type && e.source === 'host_descriptor' && routeModelIds.has(e.actual_model) && Number.isFinite(Date.parse(e.ended_at || e.ts)) && Date.parse(e.ended_at || e.ts) >= cutoff && ['succeeded', 'needs_revision', 'failed'].indexOf(e.result) !== -1)
           const byModel = new Map()
           for (const e of samples) {
-            if (typeof e.actual_model !== 'string' || !pool.some((m) => m.id === e.actual_model && m.status === 'verified')) continue
+            if (typeof e.actual_model !== 'string' || !eligiblePool.some((m) => m.id === e.actual_model && m.status === 'verified')) continue
             if (!byModel.has(e.actual_model)) byModel.set(e.actual_model, [])
             byModel.get(e.actual_model).push(e)
           }
@@ -3031,33 +3189,37 @@ export function apply(ctx) {
           })
           let recommended
           let adaptive = false
+          let fallbackReason = null
           if (row.mode === 'main-session') recommended = { mode: 'main-session', note: '主会话直接执行，不派代理' }
           else if (ranked.length > 0) {
-            const m = pool.find((x) => x.id === ranked[0].model)
+            const m = eligiblePool.find((x) => x.id === ranked[0].model)
             recommended = { provider: m.provider || 'deepseek', model: m.id, reasoning: row.reasoning || 'high' }
             adaptive = true
-          } else recommended = { mode: 'host-default', note: '最近 30 天同宿主同任务类型可信样本不足 5 次，不自适应' }
+          } else {
+            recommended = { mode: 'host-default', note: '最近 30 天同宿主同任务类型可信样本不足 5 次，不自适应' }
+            fallbackReason = { code: 'insufficient_trusted_samples', detail: '同宿主同任务类型每个候选至少需要 5 次可信终态样本' }
+          }
           let gitHead = ''
           try { gitHead = (await gitSnapshot(rootPath)).head } catch (e) { gitHead = '' }
           const sess = currentSession()
           const sessionId = sess && sess.id !== undefined ? String(sess.id) : 'unknown'
-          const routeKey = taskId + '|dsh|' + sessionId + '|' + type + '|' + gitHead
+          const routeKey = taskId + '|' + hostId + '|' + sessionId + '|' + type + '|' + gitHead
           const reusable = allEvents.slice().reverse().find((e) => e.type === 'route_decided' && e.route_key === routeKey && !allEvents.some((x) => x.type === 'attempt_started' && x.route_id === e.route_id))
-          if (reusable !== undefined) return { ok: true, task_id: taskId, task_type: type, route_id: reusable.route_id, recommended: reusable.recommended, fallback: reusable.fallback || [], sample_count: reusable.sample_count || 0, adaptive: reusable.adaptive === true, event_reused: true }
+          if (reusable !== undefined) return { ok: true, task_id: taskId, task_type: type, host_id: hostId, route_id: reusable.route_id, recommended: reusable.recommended, fallback: reusable.fallback || [], fallback_reason: reusable.fallback_reason || null, sample_count: reusable.sample_count || 0, adaptive: reusable.adaptive === true, event_reused: true }
           const seq = allEvents.filter((e) => e.type === 'route_decided' && e.route_key === routeKey).length + 1
           const routeId = stableMetricId('route', routeKey + '|' + seq)
-          const rec = { ts: nowIso(), event_id: routeId, type: 'route_decided', route_id: routeId, route_key: routeKey, task_id: taskId, task_type: type, host_id: 'dsh', session_id: sessionId, head: gitHead, window_days: 30, sample_count: samples.length, adaptive, recommended, fallback, ranking: ranked }
+          const rec = { ts: nowIso(), event_id: routeId, type: 'route_decided', route_id: routeId, route_key: routeKey, task_id: taskId, task_type: type, host_id: hostId, session_id: sessionId, head: gitHead, window_days: 30, sample_count: samples.length, adaptive, recommended, fallback, fallback_reason: fallbackReason, ranking: ranked }
           const appended = await appendMetricEventOnce(rootPath, rec)
           if (!appended.ok) return { ok: false, reason: 'route_decided event_id 冲突：拒绝覆盖已有事件' }
-          return { ok: true, task_id: taskId, task_type: type, route_id: routeId, recommended, fallback, sample_count: samples.length, adaptive, note: adaptive ? '已使用最近 30 天同宿主同任务类型可信样本路由' : recommended.note }
+          return { ok: true, task_id: taskId, task_type: type, host_id: hostId, route_id: routeId, recommended, fallback, fallback_reason: fallbackReason, sample_count: samples.length, adaptive, note: adaptive ? '已使用最近 30 天同宿主同任务类型可信样本路由' : recommended.note }
         }, false)
       },
     }))
 
     ctx.tools.register(defineTool({
       name: 'baton_record_actual',
-      description: 'Baton：记录执行 attempt_started / attempt_evaluated 事件并兼容旧 actual 证据。终态仅 succeeded|needs_revision|failed|cancelled，缺失 Token/耗时保持 null。',
-      parameters: simple({ path: '项目根目录', task_id: '任务 ID', actual_model: '实际模型（分派记录）', run_id: '子代理会话 ID（可选，尝试查宿主 descriptor）', source: 'requested | host_descriptor | unknown（可选，默认 requested）', phase: 'started | evaluated（可选；留空兼容旧 actual）', route_id: 'started 必填：baton_route 返回的 route_id', attempt_id: 'evaluated 必填：started 返回的 attempt_id', result: 'evaluated 必填：succeeded | needs_revision | failed | cancelled', total_tokens: '可选非负整数；未知留空', duration_ms: '可选非负整数；未知留空', validation_source: '可选验证来源；未知留空' }),
+      description: 'Baton：记录执行 attempt_started / attempt_evaluated 事件并兼容旧 actual 证据。分派时记录模型/档位，终态记录结果并自动计算同一 attempt 的准确耗时。',
+      parameters: simple({ path: '项目根目录', task_id: '任务 ID', actual_model: '实际分派模型', reasoning_effort: '实际分派档位（可选：low | medium | high | max）', run_id: '子代理会话 ID（可选，尝试查宿主 descriptor）', source: 'requested | host_descriptor | unknown（可选，默认 requested）', phase: 'started | evaluated（可选；留空兼容旧 actual）', route_id: 'started 必填：baton_route 返回的 route_id', attempt_id: 'evaluated 必填：started 返回的 attempt_id', result: 'evaluated 必填：succeeded | needs_revision | failed | cancelled', total_tokens: '可选非负整数；未知留空', duration_ms: '可选非负整数；留空时按同一 attempt 起止时间计算', validation_source: '可选验证来源；未知留空' }),
       output: output(),
       async execute(args) {
         const rootPath = await rootOf(args)
@@ -3075,12 +3237,14 @@ export function apply(ctx) {
           const ownGate = await ownershipGuard(rootPath)
           if (!ownGate.pass) return { ok: false, reason: '未持有单写入者锁：' + ownGate.reason }
         let actualModel = (args.actual_model || 'unknown').trim()
+        let reasoningEffort = String(args.reasoning_effort || '').trim().toLowerCase()
+        if (reasoningEffort !== '' && ['low', 'medium', 'high', 'max'].indexOf(reasoningEffort) === -1) return { ok: false, reason: 'reasoning_effort 只允许 low|medium|high|max 或留空' }
         const runId = (args.run_id || '').trim()
         let source = (args.source || 'requested').trim()
         if (['requested', 'host_descriptor', 'unknown'].indexOf(source) === -1) source = 'requested'
         // 所有进入 evidence/metrics 的调用者字段统一凭据扫描（模型名/run_id/来源等）
         const validationSource = String(args.validation_source || '').trim()
-        const secHitRa = secretHits([actualModel, runId, source, validationSource].filter((x) => typeof x === 'string').join('\n'))
+        const secHitRa = secretHits([actualModel, reasoningEffort, runId, source, validationSource].filter((x) => typeof x === 'string').join('\n'))
         if (secHitRa.length > 0) {
           return { ok: false, reason: '参数疑似含敏感信息（' + secHitRa.join('、') + '）：拒绝写入证据（凭据绝不进入 Git 跟踪文档）', secret_hits: secHitRa }
         }
@@ -3129,7 +3293,10 @@ export function apply(ctx) {
             if (openAttempt !== undefined) return { ok: true, task_id: taskId, route_id: routeId, attempt_id: openAttempt.attempt_id, event_reused: true, status: 'started' }
             const seq = allEvents.filter((e) => e.type === 'attempt_started' && e.route_id === routeId && e.run_key === runKey).length + 1
             const attemptId = stableMetricId('attempt', routeId + '|' + runKey + '|' + seq)
-            const event = { ts: nowIso(), started_at: nowIso(), event_id: attemptId + '-start', type: 'attempt_started', route_id: routeId, attempt_id: attemptId, run_key: runKey, run_id: runId || null, task_id: taskId, task_type: route.task_type, host_id: route.host_id || 'dsh', session_id: sessionId, agent_id: agentId, actual_model: actualModel, provider, source, head: evHead }
+            const startedAt = nowIso()
+            const taskDoc = await readJsonAt(rootPath, 'docs/ai_memory/state/tasks.json', { tasks: [] })
+            const taskEntry = Array.isArray(taskDoc.tasks) ? taskDoc.tasks.find((task) => task && task.id === taskId) : null
+            const event = { ts: startedAt, started_at: startedAt, event_id: attemptId + '-start', type: 'attempt_started', route_id: routeId, attempt_id: attemptId, run_key: runKey, run_id: runId || null, task_id: taskId, task_title: taskEntry && taskEntry.title ? taskEntry.title : null, task_type: route.task_type, host_id: route.host_id || 'dsh', session_id: sessionId, agent_id: agentId, executor_id: agentId, actual_model: actualModel, reasoning_effort: reasoningEffort || (route.recommended && route.recommended.reasoning) || null, provider, source, head: evHead }
             const add = await appendMetricEventOnce(rootPath, event)
             if (!add.ok) return { ok: false, reason: 'attempt_started event_id 冲突：拒绝覆盖已有事件' }
             return { ok: true, task_id: taskId, route_id: routeId, attempt_id: attemptId, status: 'started', event_reused: add.appended !== true }
@@ -3141,6 +3308,7 @@ export function apply(ctx) {
           if (runId !== startedRunId) return { ok: false, reason: 'attempt_evaluated 的 run_id 必须与 attempt_started 精确一致，禁止借用另一执行会话结算' }
           if (source !== 'host_descriptor') {
             actualModel = started.actual_model || 'unknown'
+            reasoningEffort = started.reasoning_effort || reasoningEffort
             provider = started.provider || null
             source = started.source || 'unknown'
           }
@@ -3151,13 +3319,20 @@ export function apply(ctx) {
           const duration = parseNullableCount(args.duration_ms, 'duration_ms')
           if (!duration.ok) return { ok: false, reason: duration.reason }
           const existingEval = allEvents.find((e) => e.type === 'attempt_evaluated' && e.attempt_id === attemptId)
-          const candidate = { type: 'attempt_evaluated', attempt_id: attemptId, route_id: started.route_id, task_id: taskId, task_type: started.task_type, host_id: started.host_id || 'dsh', session_id: sessionId, agent_id: agentId, run_id: runId || started.run_id || null, actual_model: actualModel, provider, source, result, total_tokens: tokens.value, duration_ms: duration.value, validation_source: validationSource || null, head: evHead }
+          const endedAt = existingEval && existingEval.ended_at ? existingEval.ended_at : nowIso()
+          let durationMs = duration.value
+          if (durationMs === null) {
+            const startedMs = Date.parse(started.started_at || started.ts)
+            const endedMs = Date.parse(endedAt)
+            if (Number.isFinite(startedMs) && Number.isFinite(endedMs) && endedMs >= startedMs) durationMs = endedMs - startedMs
+          }
+          const candidate = { type: 'attempt_evaluated', attempt_id: attemptId, route_id: started.route_id, task_id: taskId, task_title: started.task_title || null, task_type: started.task_type, host_id: started.host_id || 'dsh', session_id: sessionId, agent_id: agentId, executor_id: started.executor_id || started.agent_id || agentId, run_id: runId || started.run_id || null, actual_model: actualModel, reasoning_effort: reasoningEffort || started.reasoning_effort || null, provider, source, result, total_tokens: tokens.value, duration_ms: durationMs, validation_source: validationSource || null, head: evHead }
           if (existingEval !== undefined) {
             const terminalInput = (e) => JSON.stringify({ result: e.result, total_tokens: e.total_tokens, duration_ms: e.duration_ms, validation_source: e.validation_source || null })
             if (terminalInput(existingEval) !== terminalInput(candidate)) return { ok: false, reason: 'attempt_id 已有不同终态或评价指标：拒绝覆盖' }
             lifecycle = { attempt_id: attemptId, result, event_reused: true }
           } else {
-            const event = Object.assign({ ts: nowIso(), ended_at: nowIso(), event_id: attemptId + '-eval' }, candidate)
+            const event = Object.assign({ ts: endedAt, ended_at: endedAt, event_id: attemptId + '-eval' }, candidate)
             const add = await appendMetricEventOnce(rootPath, event)
             if (!add.ok) return { ok: false, reason: 'attempt_evaluated event_id 冲突：拒绝覆盖已有事件' }
             lifecycle = { attempt_id: attemptId, result, event_reused: add.appended !== true }
@@ -3300,8 +3475,8 @@ export function apply(ctx) {
           protected_paths: ['.github', '.env'],
           verify: { remote_sha: true, ff_only: true },
           model_pool: [
-            { id: 'deepseek-v4-flash', provider: 'deepseek', tags: ['fast', 'cheap'], status: 'unverified' },
-            { id: 'deepseek-v4-pro', provider: 'deepseek', tags: ['reasoning', 'review'], status: 'unverified' },
+            { id: 'deepseek-v4-flash', provider: 'deepseek', host_id: 'dsh', tags: ['fast', 'cheap'], status: 'unverified' },
+            { id: 'deepseek-v4-pro', provider: 'deepseek', host_id: 'dsh', tags: ['reasoning', 'review'], status: 'unverified' },
           ],
           routing: [
             { task: 'micro', mode: 'main-session' },
@@ -3328,7 +3503,47 @@ export function apply(ctx) {
           if (r && typeof r.ts === 'string') runs.push(r)
         } catch (e) { badLines += 1 }
       }
-      const trustedSource = (s) => ['host_descriptor', 'host_reported', 'dispatch_confirmed', 'host_default'].indexOf(s) !== -1
+      const taskById = new Map()
+      try {
+        const taskState = JSON.parse((await readTextAt(rootPath, 'docs/ai_memory/state/tasks.json')) || '{}')
+        for (const task of Array.isArray(taskState.tasks) ? taskState.tasks : []) if (task && task.id) taskById.set(task.id, task)
+      } catch (e) {}
+      const tierLabel = (value) => ({ low: '低', medium: '中', high: '高', max: '极高' }[String(value || '').toLowerCase()] || '未采集')
+      const resultLabel = (value) => ({ succeeded: '成功', needs_revision: '返修', failed: '失败', cancelled: '取消', unarchived: '执行中' }[value] || '未采集')
+      const durationLabel = (value) => {
+        if (!Number.isSafeInteger(value) || value < 0) return '未采集'
+        const seconds = Math.round(value / 1000)
+        if (seconds < 60) return seconds + '秒'
+        const minutes = Math.floor(seconds / 60)
+        const rest = seconds % 60
+        if (minutes < 60) return minutes + '分' + String(rest).padStart(2, '0') + '秒'
+        const hours = Math.floor(minutes / 60)
+        return hours + '时' + String(minutes % 60).padStart(2, '0') + '分' + String(rest).padStart(2, '0') + '秒'
+      }
+      const elapsedMs = (start, end) => {
+        const startMs = Date.parse(start)
+        const endMs = Date.parse(end)
+        return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs ? endMs - startMs : null
+      }
+      const enrichUnit = (unit) => {
+        const task = taskById.get(unit.task) || null
+        const modelKnown = typeof unit.model === 'string' && unit.model !== '' && unit.model !== 'unknown'
+        const d = new Date(unit.ts)
+        const east8 = Number.isNaN(d.getTime()) ? null : east8Stamp(d)
+        return Object.assign({}, unit, {
+          task_id: unit.task,
+          task_name: unit.task_title || (task && task.title) || '未采集',
+          model: modelKnown ? unit.model : '未采集',
+          tier: tierLabel(unit.reasoning_effort),
+          record_type: modelKnown && unit.source !== 'unknown' ? '实际' : '未采集',
+          result_display: resultLabel(unit.result),
+          duration_display: durationLabel(unit.duration_ms),
+          day: east8 ? east8.date : 'unknown',
+          hour: east8 ? Number(east8.hm.slice(0, 2)) : null,
+          time_display: east8 ? east8.date + ' ' + east8.hm + ':' + String(d.getUTCSeconds()).padStart(2, '0') : '未采集',
+          trusted: unit.source === 'host_descriptor' || unit.source === 'host_reported',
+        })
+      }
       const completed = new Map()
       const actual = []
       const attempts = []
@@ -3345,43 +3560,38 @@ export function apply(ctx) {
           continue
         }
         if (r.type === 'task_complete' && r.task_id) {
-          completed.set(r.task_id, { task_id: r.task_id, ts: r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'succeeded', token: null, duration_ms: null })
+          completed.set(r.task_id, { task_id: r.task_id, task_title: r.task_title || null, ts: r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'succeeded', token: null, duration_ms: Number.isSafeInteger(r.duration_ms) ? r.duration_ms : null })
         } else if (r.type === 'actual') {
           actual.push(r)
         } else if (r.type === 'attempt_evaluated') {
           if (r.attempt_id && evaluatedAttempts.has(r.attempt_id)) continue
           if (r.attempt_id) evaluatedAttempts.add(r.attempt_id)
           if (r.task_id) lifecycleTaskIds.add(r.task_id)
-          attempts.push({ task_id: r.task_id || null, ts: r.ended_at || r.ts, actual_model: r.actual_model || r.model || 'unknown', reasoning_effort: r.actual_reasoning_effort || r.reasoning_effort || null, source: r.actual_source || r.source || 'unknown', role: r.role || 'executor', result: r.result || r.status || 'unknown', token: Number.isFinite(r.total_tokens) ? r.total_tokens : (Number.isFinite(r.tokens) ? r.tokens : null), duration_ms: Number.isFinite(r.duration_ms) ? r.duration_ms : null })
+          const started = r.attempt_id ? startedAttempts.get(r.attempt_id) : null
+          const endedAt = r.ended_at || r.ts
+          const durationMs = Number.isSafeInteger(r.duration_ms) ? r.duration_ms : (started ? elapsedMs(started.started_at || started.ts, endedAt) : null)
+          attempts.push({ task_id: r.task_id || null, task_title: r.task_title || (started && started.task_title) || null, ts: endedAt, actual_model: r.actual_model || r.model || (started && started.actual_model) || 'unknown', reasoning_effort: r.actual_reasoning_effort || r.reasoning_effort || (started && started.reasoning_effort) || null, source: r.actual_source || r.source || (started && started.source) || 'unknown', role: r.role || (started && started.role) || 'executor', result: r.result || r.status || 'unknown', token: Number.isFinite(r.total_tokens) ? r.total_tokens : (Number.isFinite(r.tokens) ? r.tokens : null), duration_ms: durationMs })
         }
       }
       for (const [attemptId, r] of startedAttempts.entries()) {
-        if (!evaluatedAttempts.has(attemptId)) attempts.push({ task_id: r.task_id || null, ts: r.started_at || r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'unarchived', token: null, duration_ms: null })
+        if (!evaluatedAttempts.has(attemptId)) attempts.push({ task_id: r.task_id || null, task_title: r.task_title || null, ts: r.started_at || r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'unarchived', token: null, duration_ms: null })
       }
       const recordedOnly = []
       for (const r of actual) {
         if (r.task_id && lifecycleTaskIds.has(r.task_id)) continue
         if (r.task_id && completed.has(r.task_id)) {
           const u = completed.get(r.task_id)
-          if (trustedSource(r.source) && r.actual_model && r.actual_model !== 'unknown') {
+          if (r.source !== 'unknown' && r.actual_model && r.actual_model !== 'unknown') {
             u.actual_model = r.actual_model
             u.reasoning_effort = r.reasoning_effort || null
             u.source = r.source
           }
         } else {
-          recordedOnly.push({ task_id: r.task_id || null, ts: r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'unarchived', token: null, duration_ms: null })
+          recordedOnly.push({ task_id: r.task_id || null, task_title: r.task_title || null, ts: r.ts, actual_model: r.actual_model || 'unknown', reasoning_effort: r.reasoning_effort || null, source: r.source || 'unknown', role: r.role || 'executor', result: 'unarchived', token: null, duration_ms: null })
         }
       }
       const legacyCompleted = [...completed.values()].filter((u) => !lifecycleTaskIds.has(u.task_id))
-      const units = legacyCompleted.concat(attempts, recordedOnly).map((u) => {
-        const d = new Date(u.ts)
-        const validDate = !Number.isNaN(d.getTime())
-        const east8 = validDate ? east8Stamp(d) : null
-        const day = east8 !== null ? east8.date : 'unknown'
-        const trusted = trustedSource(u.source) && u.actual_model !== 'unknown'
-        const model = trusted ? u.actual_model + (u.reasoning_effort ? ' / ' + u.reasoning_effort : '') : 'unknown / 声明（未证实）'
-        return { task: u.task_id || 'n/a', ts: u.ts, day, hour: east8 !== null ? Number(east8.hm.slice(0, 2)) : null, model, trusted, role: u.role || 'executor', result: u.result || 'unknown', token: u.token, duration_ms: u.duration_ms }
-      })
+      const units = legacyCompleted.concat(attempts, recordedOnly).map((u) => enrichUnit({ task: u.task_id || 'n/a', task_title: u.task_title || null, ts: u.ts, model: u.actual_model || 'unknown', reasoning_effort: u.reasoning_effort || null, source: u.source || 'unknown', role: u.role || 'executor', result: u.result || 'unknown', token: u.token, duration_ms: u.duration_ms }))
       const dates = [...new Set(units.map((u) => u.day).filter((d) => d !== 'unknown'))].sort()
       const monthPrefix = month.replace('/', '-')
       const defaultDate = today.indexOf(monthPrefix) === 0 ? today : (dates.length > 0 ? dates[dates.length - 1] : monthPrefix + '-01')
@@ -3403,6 +3613,7 @@ export function apply(ctx) {
           failed: knownResults.length > 0 ? units.filter((u) => u.result === 'failed').length : null,
           blocked: null,
           total_ms: units.some((u) => u.duration_ms !== null) ? units.reduce((n, u) => n + (u.duration_ms || 0), 0) : null,
+          factual_coverage: units.length > 0 ? units.filter((u) => u.record_type === '实际').length / units.length : null,
         },
         days,
         orchestration: { provider_status: [], routing_modes: ['baton-static'], buckets: [], attempts: [] },
@@ -3413,23 +3624,37 @@ export function apply(ctx) {
       const hourTargets = Array.from({ length: 24 }, (_, h) => '<rect class="hour-hit" data-hour="' + h + '" x="' + (48 + h * 37) + '" y="18" width="37" height="218" fill="transparent"/>').join('')
       const boardNames = ['综合推荐榜', '首次通过率榜', '低返修榜', '稳定性榜', 'Token 效率榜', '速度榜']
       const boards = boardNames.map((n, i) => '<section class="rank"><h3>' + n + '</h3><div id="rank' + i + '" class="muted">未记录</div></section>').join('')
-      return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Baton Metrics</title><style>' +
+      const reportHtml = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Baton Metrics</title><style>' +
         'body{font-family:Segoe UI,sans-serif;background:#0c1422;color:#e8eef8;margin:0;padding:24px}.wrap{max-width:1200px;margin:auto}' +
         '.top,.filters{display:flex;justify-content:space-between;align-items:end;gap:16px}.filters{justify-content:flex-start;align-items:center;flex-wrap:wrap}' +
-        '.muted{color:#8ea4bf;font-size:12px}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:20px 0}' +
+        '.muted{color:#8ea4bf;font-size:12px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:20px 0}' +
         '.card,.panel,.rank{background:#122035;border:1px solid #29405d;border-radius:12px;padding:14px}.value{font-size:24px}' +
-        '.panel{margin:14px 0}.chart-wrap{position:relative;overflow-x:auto}svg{width:100%;min-width:930px;height:280px}.axis{stroke:#29405d}.trend{fill:none;stroke-width:2.5}' +
+        '.panel{margin:14px 0}.chart-wrap,#details{position:relative;overflow-x:auto}svg{width:100%;min-width:930px;height:280px}.axis{stroke:#29405d}.trend{fill:none;stroke-width:2.5}' +
         '#chartTooltip{position:absolute;display:none;pointer-events:none;white-space:pre;background:#08101d;border:1px solid #52749b;border-radius:8px;padding:8px;font-size:12px}' +
         '.ranks{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.rank h3,h2{font-size:14px;color:#9fb5cf;margin:4px 0 10px}' +
         'table{width:100%;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid #29405d;text-align:left}select{background:#122035;color:#e8eef8;border:1px solid #52749b;padding:6px}' +
         '@media(max-width:760px){.cards{grid-template-columns:repeat(2,1fr)}.ranks{grid-template-columns:1fr}}' +
         '</style></head><body data-default-date="' + esc(defaultDate) + '"><main class="wrap"><div class="top"><div><div class="muted">BATON / MONTHLY METRICS</div><h1>执行效果月报</h1><div class="muted">' + esc(month) + ' ｜ 分支 ' + esc(git.branch) + '</div></div></div>' +
-        '<section class="filters"><label>日期 <select id="dateSelect">' + options + '</select></label><label><input id="includeMain" type="checkbox"> 包含主会话</label><label><input id="mergeReasoning" type="checkbox"> 合并同模型推理档位</label><span id="dataWarning" class="muted"></span></section>' +
-        '<section class="cards"><article class="card"><div class="muted">执行尝试</div><div id="attempts" class="value">0</div></article><article class="card"><div class="muted">成功</div><div id="success" class="value">未记录</div></article><article class="card"><div class="muted">返修</div><div id="revision" class="value">未记录</div></article><article class="card"><div class="muted">失败</div><div id="failure" class="value">未记录</div></article><article class="card"><div class="muted">Token</div><div id="tokens" class="value">未记录</div></article></section>' +
+        '<section class="filters"><label>日期 <select id="dateSelect">' + options + '</select></label><label><input id="includeMain" type="checkbox"> 包含主会话</label><label><input id="mergeReasoning" type="checkbox"> 合并同模型推理档位</label><label><input id="includeEstimated" type="checkbox"> 包含估算（参考排行）</label><span id="dataWarning" class="muted"></span></section>' +
+        '<section class="cards"><article class="card"><div class="muted">执行尝试</div><div id="attempts" class="value">0</div></article><article class="card"><div class="muted">成功</div><div id="success" class="value">未记录</div></article><article class="card"><div class="muted">返修</div><div id="revision" class="value">未记录</div></article><article class="card"><div class="muted">失败</div><div id="failure" class="value">未记录</div></article><article class="card"><div class="muted">Token</div><div id="tokens" class="value">未记录</div></article><article class="card"><div class="muted">真实覆盖率</div><div id="verifiedCoverage" class="value">未记录</div></article><article class="card"><div class="muted">估算覆盖率</div><div id="estimatedCoverage" class="value">未记录</div></article></section>' +
         '<section class="panel"><h2>0–23 小时模型使用趋势</h2><div class="chart-wrap"><svg id="hourlyChart" viewBox="0 0 960 270" role="img" aria-label="按小时模型使用次数折线图"><g id="axes"></g><g id="lines"></g>' + hourTargets + '</svg><div id="chartTooltip"></div></div><div id="legend" class="muted"></div></section>' +
-        '<section class="panel"><h2>榜单</h2><div class="ranks">' + boards + '</div></section>' +
+        '<section class="panel"><h2>榜单</h2><div class="muted" id="rankingMode">可信榜单（仅已核实数据）</div><div class="ranks">' + boards + '</div></section>' +
         '<section class="panel"><h2>所选日期执行明细</h2><div id="details"></div></section></main>' +
         '<script>window.__METRICS__=' + safeJson + ';</script>\n' +
-        '<script>(function(){var D=window.__METRICS__,S=document.getElementById("dateSelect"),M=document.getElementById("includeMain"),G=document.getElementById("mergeReasoning"),svg=document.getElementById("hourlyChart"),tip=document.getElementById("chartTooltip"),colors=["#55c2ff","#ffb454","#79d98c","#c099ff","#ff718b","#d9d46c"];function val(v){return v===null||v===undefined?"未记录":String(v)}function html(v){var d=document.createElement("div");d.textContent=String(v);return d.innerHTML}function rows(){return(D.days[S.value]||[]).filter(function(u){return M.checked||u.role!=="main"}).map(function(u){var x=Object.assign({},u);if(G.checked)x.model=x.model.replace(/ \/ (low|medium|high|max)$/," ");return x})}function groups(rs){var o={};rs.forEach(function(u){(o[u.model]||(o[u.model]=[])).push(u)});return o}function set(id,v){document.getElementById(id).textContent=val(v)}function render(){var rs=rows(),known=rs.filter(function(u){return["succeeded","needs_revision","failed","cancelled"].indexOf(u.result)!==-1});set("attempts",rs.length);set("success",known.length?known.filter(function(u){return u.result==="succeeded"}).length:null);set("revision",known.length?known.filter(function(u){return u.result==="needs_revision"}).length:null);set("failure",known.length?known.filter(function(u){return u.result==="failed"}).length:null);var tk=rs.filter(function(u){return u.token!==null});set("tokens",tk.length?tk.reduce(function(n,u){return n+u.token},0):null);var ax="",ln="",gs=groups(rs),max=1;Object.keys(gs).forEach(function(k){for(var h=0;h<24;h++)max=Math.max(max,gs[k].filter(function(u){return u.hour===h}).length)});for(var h=0;h<24;h++){var x=66+h*37;ax+="<line class=\"axis\" x1=\""+x+"\" y1=\"20\" x2=\""+x+"\" y2=\"230\"/><text x=\""+x+"\" y=\"252\" fill=\"#8ea4bf\" font-size=\"10\" text-anchor=\"middle\">"+h+"</text>"}Object.keys(gs).forEach(function(k,i){var pts=[];for(var h=0;h<24;h++){var n=gs[k].filter(function(u){return u.hour===h}).length;pts.push((66+h*37)+","+(230-n/max*190))}ln+="<polyline class=\"trend\" stroke=\""+colors[i%colors.length]+"\" points=\""+pts.join(" ")+"\"/>"});document.getElementById("axes").innerHTML=ax;document.getElementById("lines").innerHTML=ln;document.getElementById("legend").textContent=Object.keys(gs).join(" ｜ ")||"未记录";var trusted=rs.filter(function(u){return u.trusted}),stats=groups(trusted),arr=Object.keys(stats).map(function(k){var a=stats[k],q=a.filter(function(u){return["succeeded","needs_revision","failed"].indexOf(u.result)!==-1}),s=q.filter(function(u){return u.result==="succeeded"}),t=s.filter(function(u){return u.token!==null}),d=s.filter(function(u){return u.duration_ms!==null}).map(function(u){return u.duration_ms}).sort(function(a,b){return a-b});return{model:k,n:a.length,pass:q.length?s.length/q.length:null,rework:q.length?q.filter(function(u){return u.result==="needs_revision"}).length/q.length:null,fail:q.length?q.filter(function(u){return u.result==="failed"}).length/q.length:null,tok:t.length?t.reduce(function(n,u){return n+u.token},0)/t.length:null,speed:d.length?d[Math.floor(d.length/2)]:null}});function board(id,metric,asc){var a=arr.filter(function(x){return x[metric]!==null}).sort(function(x,y){return asc?x[metric]-y[metric]:y[metric]-x[metric]});document.getElementById(id).innerHTML=a.length?"<table><tr><th>配置</th><th>指标</th><th>使用次数</th></tr>"+a.map(function(x){return"<tr><td>"+html(x.model)+"</td><td>"+(metric==="pass"||metric==="rework"||metric==="fail"?Math.round(x[metric]*100)+"%":Math.round(x[metric]))+"</td><td>"+x.n+"</td></tr>"}).join("")+"</table>":"未记录（无可信且覆盖该指标的模型执行结果）"}board("rank0","pass",false);board("rank1","pass",false);board("rank2","rework",true);board("rank3","fail",true);board("rank4","tok",true);board("rank5","speed",true);document.getElementById("details").innerHTML=rs.length?"<table><tr><th>时间</th><th>模型/档位</th><th>结果</th><th>Token</th><th>耗时(ms)</th></tr>"+rs.map(function(u){return"<tr><td>"+html(u.ts)+"</td><td>"+html(u.model)+"</td><td>"+html(u.result)+"</td><td>"+html(val(u.token))+"</td><td>"+html(val(u.duration_ms))+"</td></tr>"}).join("")+"</table>":"<span class=\"muted\">当天无执行记录</span>";document.getElementById("dataWarning").textContent=D.bad_lines?"数据警告：跳过 "+D.bad_lines+" 行损坏 JSON":""}svg.addEventListener("mousemove",function(e){var t=e.target.closest(".hour-hit");if(!t)return;var h=Number(t.getAttribute("data-hour")),rs=rows().filter(function(u){return u.hour===h}),gs=groups(rs),out=[String(h).padStart(2,"0")+":00"];Object.keys(gs).forEach(function(k){var a=gs[k];out.push(k+"：使用 "+a.length+"，成功 "+a.filter(function(u){return u.result==="succeeded"}).length+"，返修 "+a.filter(function(u){return u.result==="needs_revision"}).length+"，失败 "+a.filter(function(u){return u.result==="failed"}).length+"，Token "+val(a.some(function(u){return u.token!==null})?a.reduce(function(n,u){return n+(u.token||0)},0):null)+"，耗时 "+val(a.some(function(u){return u.duration_ms!==null})?a.reduce(function(n,u){return n+(u.duration_ms||0)},0):null))});tip.textContent=out.join("\\n");tip.style.display="block";tip.style.left=(e.offsetX+12)+"px";tip.style.top=(e.offsetY+8)+"px"});svg.addEventListener("mouseleave",function(){tip.style.display="none"});S.addEventListener("change",render);M.addEventListener("change",render);G.addEventListener("change",render);render()})();</script></body></html>'
+        '<script>(function(){var D=window.__METRICS__,S=document.getElementById("dateSelect"),M=document.getElementById("includeMain"),G=document.getElementById("mergeReasoning"),E=document.getElementById("includeEstimated"),svg=document.getElementById("hourlyChart"),tip=document.getElementById("chartTooltip"),colors=["#55c2ff","#ffb454","#79d98c","#c099ff","#ff718b","#d9d46c"];function val(v){return v===null||v===undefined?"未记录":String(v)}function html(v){var d=document.createElement("div");d.textContent=String(v);return d.innerHTML}function rows(){return(D.days[S.value]||[]).filter(function(u){return M.checked||u.role!=="main"}).map(function(u){var x=Object.assign({},u);if(G.checked)x.model=x.model.replace(/ \/ (low|medium|high|max)$/," ");return x})}function groups(rs){var o={};rs.forEach(function(u){(o[u.model]||(o[u.model]=[])).push(u)});return o}function set(id,v){document.getElementById(id).textContent=val(v)}function render(){var rs=rows(),known=rs.filter(function(u){return["succeeded","needs_revision","failed","cancelled"].indexOf(u.result)!==-1});set("attempts",rs.length);set("success",known.length?known.filter(function(u){return u.result==="succeeded"}).length:null);set("revision",known.length?known.filter(function(u){return u.result==="needs_revision"}).length:null);set("failure",known.length?known.filter(function(u){return u.result==="failed"}).length:null);var tk=rs.filter(function(u){return u.token!==null});set("tokens",tk.length?tk.reduce(function(n,u){return n+u.token},0):null);set("verifiedCoverage",rs.length?Math.round(rs.filter(function(u){return u.data_level==="已核实"}).length/rs.length*100)+"%":null);set("estimatedCoverage",rs.length?Math.round(rs.filter(function(u){return u.estimated}).length/rs.length*100)+"%":null);var ax="",ln="",gs=groups(rs),max=1;Object.keys(gs).forEach(function(k){for(var h=0;h<24;h++)max=Math.max(max,gs[k].filter(function(u){return u.hour===h}).length)});for(var h=0;h<24;h++){var x=66+h*37;ax+="<line class=\\\"axis\\\" x1=\\\""+x+"\\\" y1=\\\"20\\\" x2=\\\""+x+"\\\" y2=\\\"230\\\"/><text x=\\\""+x+"\\\" y=\\\"252\\\" fill=\\\"#8ea4bf\\\" font-size=\\\"10\\\" text-anchor=\\\"middle\\\">"+h+"</text>"}Object.keys(gs).forEach(function(k,i){var pts=[];for(var h=0;h<24;h++){var n=gs[k].filter(function(u){return u.hour===h}).length;pts.push((66+h*37)+","+(230-n/max*190))}ln+="<polyline class=\\\"trend\\\" stroke=\\\""+colors[i%colors.length]+"\\\" points=\\\""+pts.join(" ")+"\\\"/>"});document.getElementById("axes").innerHTML=ax;document.getElementById("lines").innerHTML=ln;document.getElementById("legend").textContent=Object.keys(gs).join(" ｜ ")||"未记录";var rankingRows=rs.filter(function(u){return (u.trusted&&!u.estimated)||(E.checked&&u.estimated)}).map(function(u){var x=Object.assign({},u);if(E.checked&&x.token===null)x.token=x.estimated_token_midpoint;if(E.checked&&x.duration_ms===null)x.duration_ms=x.estimated_duration_midpoint_ms;return x}),stats=groups(rankingRows),arr=Object.keys(stats).map(function(k){var a=stats[k],q=a.filter(function(u){return["succeeded","needs_revision","failed"].indexOf(u.result)!==-1}),s=q.filter(function(u){return u.result==="succeeded"}),t=s.filter(function(u){return u.token!==null}),d=s.filter(function(u){return u.duration_ms!==null}).map(function(u){return u.duration_ms}).sort(function(a,b){return a-b});return{model:k,n:a.length,pass:q.length?s.length/q.length:null,rework:q.length?q.filter(function(u){return u.result==="needs_revision"}).length/q.length:null,fail:q.length?q.filter(function(u){return u.result==="failed"}).length/q.length:null,tok:t.length?t.reduce(function(n,u){return n+u.token},0)/t.length:null,speed:d.length?d[Math.floor(d.length/2)]:null}});function board(id,metric,asc){var a=arr.filter(function(x){return x[metric]!==null}).sort(function(x,y){return asc?x[metric]-y[metric]:y[metric]-x[metric]});document.getElementById(id).innerHTML=a.length?"<table><tr><th>配置</th><th>指标</th><th>使用次数</th></tr>"+a.map(function(x){return"<tr><td>"+html(x.model)+"</td><td>"+(metric==="pass"||metric==="rework"||metric==="fail"?Math.round(x[metric]*100)+"%":Math.round(x[metric]))+"</td><td>"+x.n+"</td></tr>"}).join("")+"</table>":"未记录（无可信且覆盖该指标的模型执行结果）"}board("rank0","pass",false);board("rank1","pass",false);board("rank2","rework",true);board("rank3","fail",true);board("rank4","tok",true);board("rank5","speed",true);document.getElementById("details").innerHTML=rs.length?"<table><tr><th>时间</th><th>任务</th><th>模型/档位</th><th>结果</th><th>Token</th><th>耗时</th><th>数据级别</th><th>依据</th></tr>"+rs.map(function(u){return"<tr><td>"+html(u.ts)+"</td><td>"+html(u.task)+"</td><td>"+html(u.model)+"</td><td>"+html(u.result)+"</td><td>"+html(u.token_display)+"</td><td>"+html(u.duration_display)+"</td><td>"+html(u.data_level+" / "+u.confidence)+"</td><td>"+html(u.basis)+"</td></tr>"}).join("")+"</table>":"<span class=\\\"muted\\\">当天无执行记录</span>";document.getElementById("dataWarning").textContent=D.bad_lines?"数据警告：跳过 "+D.bad_lines+" 行损坏 JSON":"";document.getElementById("rankingMode").textContent=E.checked?"参考排行（包含明确标注的估算）":"可信榜单（仅已核实数据）"}svg.addEventListener("mousemove",function(e){var t=e.target.closest(".hour-hit");if(!t)return;var h=Number(t.getAttribute("data-hour")),rs=rows().filter(function(u){return u.hour===h}),gs=groups(rs),out=[String(h).padStart(2,"0")+":00"];Object.keys(gs).forEach(function(k){var a=gs[k];out.push(k+"：使用 "+a.length+"，成功 "+a.filter(function(u){return u.result==="succeeded"}).length+"，返修 "+a.filter(function(u){return u.result==="needs_revision"}).length+"，失败 "+a.filter(function(u){return u.result==="failed"}).length+"，Token "+val(a.some(function(u){return u.token!==null})?a.reduce(function(n,u){return n+(u.token||0)},0):null)+"，耗时 "+val(a.some(function(u){return u.duration_ms!==null})?a.reduce(function(n,u){return n+(u.duration_ms||0)},0):null))});tip.textContent=out.join("\\n");tip.style.display="block";tip.style.left=(e.offsetX+12)+"px";tip.style.top=(e.offsetY+8)+"px"});svg.addEventListener("mouseleave",function(){tip.style.display="none"});S.addEventListener("change",render);M.addEventListener("change",render);G.addEventListener("change",render);E.addEventListener("change",render);render()})();</script></body></html>'
+      const factualHtml = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Baton 模型执行统计</title><style>' +
+        ':root{--ink:#152033;--muted:#6b778c;--line:#dce3ec;--soft:#f5f7fa;--blue:#2f5cff;--green:#087a55;--amber:#9a5a00;--red:#b4232c}*{box-sizing:border-box}body{margin:0;background:#edf1f6;color:var(--ink);font-family:"Microsoft YaHei UI","Segoe UI",sans-serif}.wrap{max-width:1280px;margin:auto;padding:28px 24px 48px}.eyebrow{color:var(--blue);font-size:11px;font-weight:800;letter-spacing:.14em}.top{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin:6px 0 20px}.top h1{margin:0;font-size:28px}.month{color:var(--muted);font-size:13px}.filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.filters label{font-size:12px;color:var(--muted)}select{margin-left:6px;padding:8px 30px 8px 10px;background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:7px}.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:14px}.card,.panel{background:#fff;border:1px solid var(--line);border-radius:10px}.card{min-height:82px;padding:14px}.label{color:var(--muted);font-size:11px}.value{margin-top:7px;font-size:22px;font-weight:750}.panel{margin-top:14px;overflow:hidden}.panel-head{display:flex;justify-content:space-between;gap:12px;padding:15px 16px;border-bottom:1px solid var(--line)}h2{margin:0;font-size:14px}.muted{color:var(--muted);font-size:11px}.chart-wrap{position:relative;overflow-x:auto;padding:8px 12px 0}svg{display:block;width:100%;min-width:930px;height:270px}.axis{stroke:#e4e9f0}.trend{fill:none;stroke-width:2.5}#chartTooltip{position:absolute;display:none;pointer-events:none;white-space:pre;background:#152033;color:#fff;border-radius:7px;padding:8px 10px;font-size:11px}.table-wrap{overflow-x:auto}.metrics{width:100%;min-width:1040px;table-layout:fixed;border-collapse:collapse;font-size:12px}.metrics th{padding:10px 9px;color:#56647a;background:var(--soft);border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}.metrics td{padding:11px 9px;border-bottom:1px solid #e8edf3;vertical-align:middle}.metrics col:nth-child(1){width:150px}.metrics col:nth-child(2){width:132px}.metrics col:nth-child(3){width:270px}.metrics col:nth-child(4){width:78px}.metrics col:nth-child(5){width:68px}.metrics col:nth-child(6){width:72px}.metrics col:nth-child(7){width:72px}.metrics col:nth-child(8){width:96px}.mono{font-family:Consolas,monospace;font-size:11px}.task-name{font-weight:650}.pill{display:inline-flex;padding:3px 7px;border-radius:999px;font-size:10px;font-weight:750}.actual,.success{color:var(--green);background:#dff7ec}.missing{color:#667085;background:#eef1f4}.revision{color:var(--amber);background:#fff0ce}.failed{color:var(--red);background:#ffe4e6}.note{padding:12px 16px;color:var(--muted);font-size:11px;border-top:1px solid var(--line)}@media(max-width:800px){.wrap{padding:20px 14px 36px}.top{align-items:flex-start;flex-direction:column}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.card:last-child{grid-column:1/-1}}' +
+        '</style></head><body data-default-date="' + esc(defaultDate) + '"><main class="wrap"><div class="eyebrow">BATON / AGENT METRICS</div><div class="top"><div><h1>模型执行统计</h1><div class="month">' + esc(month) + ' · 东八区 · ' + esc(git.branch) + '</div></div><section class="filters"><label>查看日期<select id="dateSelect">' + options + '</select></label><span id="dataWarning" class="muted"></span></section></div><section class="cards"><article class="card"><div class="label">执行任务</div><div id="attempts" class="value">0</div></article><article class="card"><div class="label">成功</div><div id="success" class="value">0</div></article><article class="card"><div class="label">返修</div><div id="revision" class="value">0</div></article><article class="card"><div class="label">失败</div><div id="failure" class="value">0</div></article><article class="card"><div class="label">准确耗时覆盖</div><div id="durationCoverage" class="value">0%</div></article></section><section class="panel"><div class="panel-head"><h2>0–23 小时模型使用趋势</h2><span class="muted">按任务完成时间统计</span></div><div class="chart-wrap"><svg id="hourlyChart" viewBox="0 0 960 270" role="img"><g id="axes"></g><g id="lines"></g>' + hourTargets + '</svg><div id="chartTooltip"></div></div><div id="legend" class="note"></div></section><section class="panel"><div class="panel-head"><h2>所选日期执行明细</h2><span class="muted">分配即记录，结束即结算</span></div><div id="details" class="table-wrap"></div><div class="note">旧记录缺失字段显示“未采集”，不从 owner、任务类型或生命周期逆推。</div></section></main><script>window.__METRICS__=' + safeJson + ';</script><script>' +
+        '(function(){var D=window.__METRICS__;</script></body></html>'
+      const interactiveScript = String.raw`(function(){
+        var D=window.__METRICS__,S=document.getElementById('dateSelect'),svg=document.getElementById('hourlyChart'),tip=document.getElementById('chartTooltip'),colors=['#2f5cff','#e78b00','#0b8f68','#a04dd8','#cf3c55'];
+        function html(v){var d=document.createElement('div');d.textContent=String(v==null?'未采集':v);return d.innerHTML}
+        function rows(){return D.days[S.value]||[]}
+        function groups(rs){var o={};rs.filter(function(u){return u.model!=='未采集'}).forEach(function(u){(o[u.model]||(o[u.model]=[])).push(u)});return o}
+        function set(id,v){document.getElementById(id).textContent=String(v)}function badge(v,k){return '<span class="pill '+k+'">'+html(v)+'</span>'}
+        function render(){var rs=rows(),known=rs.filter(function(u){return ['succeeded','needs_revision','failed','cancelled'].indexOf(u.result)!==-1});set('attempts',rs.length);set('success',known.filter(function(u){return u.result==='succeeded'}).length);set('revision',known.filter(function(u){return u.result==='needs_revision'}).length);set('failure',known.filter(function(u){return u.result==='failed'}).length);set('durationCoverage',rs.length?Math.round(rs.filter(function(u){return u.duration_ms!==null}).length/rs.length*100)+'%':'0%');var ax='',ln='',gs=groups(rs),max=1;Object.keys(gs).forEach(function(k){for(var h=0;h<24;h++)max=Math.max(max,gs[k].filter(function(u){return u.hour===h}).length)});for(var h=0;h<24;h++){var x=66+h*37;ax+='<line class="axis" x1="'+x+'" y1="20" x2="'+x+'" y2="230"/><text x="'+x+'" y="252" fill="#7b8799" font-size="10" text-anchor="middle">'+h+'</text>'}Object.keys(gs).forEach(function(k,i){var pts=[];for(var h=0;h<24;h++){var n=gs[k].filter(function(u){return u.hour===h}).length;pts.push((66+h*37)+','+(230-n/max*190))}ln+='<polyline class="trend" stroke="'+colors[i%colors.length]+'" points="'+pts.join(' ')+'"/>'});document.getElementById('axes').innerHTML=ax;document.getElementById('lines').innerHTML=ln;document.getElementById('legend').textContent=Object.keys(gs).join(' ｜ ')||'当天无已记录模型';document.getElementById('details').innerHTML=rs.length?'<table class="metrics"><colgroup><col><col><col><col><col><col><col><col></colgroup><thead><tr><th>时间</th><th>任务ID</th><th>任务名称</th><th>模型</th><th>档位</th><th>类型</th><th>结果</th><th>耗时</th></tr></thead><tbody>'+rs.map(function(u){var k=u.result==='succeeded'?'success':u.result==='needs_revision'?'revision':u.result==='failed'?'failed':'missing';return '<tr><td class="mono">'+html(u.time_display)+'</td><td class="mono">'+html(u.task_id)+'</td><td class="task-name">'+html(u.task_name)+'</td><td>'+html(u.model)+'</td><td>'+html(u.tier)+'</td><td>'+badge(u.record_type,u.record_type==='实际'?'actual':'missing')+'</td><td>'+badge(u.result_display,k)+'</td><td>'+html(u.duration_display)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="note">当天无执行记录</div>';document.getElementById('dataWarning').textContent=D.bad_lines?'跳过 '+D.bad_lines+' 行损坏数据':''}
+        svg.addEventListener('mousemove',function(e){var t=e.target.closest('.hour-hit');if(!t)return;var h=Number(t.getAttribute('data-hour')),gs=groups(rows().filter(function(u){return u.hour===h})),out=[String(h).padStart(2,'0')+':00'];Object.keys(gs).forEach(function(k){out.push(k+'：'+gs[k].length+' 次')});tip.textContent=out.join('\n');tip.style.display='block';tip.style.left=(e.offsetX+12)+'px';tip.style.top=(e.offsetY+8)+'px'});svg.addEventListener('mouseleave',function(){tip.style.display='none'});S.addEventListener('change',render);render();
+      })();`
+      return factualHtml.replace(/<script>\(function\(\)\{[\s\S]*?<\/script><\/body><\/html>$/, '<script>' + interactiveScript + '</script></body></html>')
     }
 }

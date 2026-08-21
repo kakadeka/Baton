@@ -189,16 +189,32 @@ Baton 版本闭环：安装留版本锚、可检查、可更新。**用户不当
 
 **规则跨平台一致；执行用各平台自己的机制。** 本协议分三层：①分类（所有平台相同）②路由（DSH 用 baton_route 机械读取具体模型；其它平台只读取任务类型与标签并映射到宿主原生能力）③分派与记录（见各平台小节）。
 
+**宿主模型池硬隔离（先判宿主、再选模型）**：每次分派先识别当前用户实际使用的宿主，只能调用该宿主本轮真实暴露的模型和代理机制。DSH 只读 `host_id=dsh` 且 `status=verified` 的 provider/model；Codex 只用 Codex 原生子代理可选模型；Claude Code 与 Cursor 同理。Sol/Luna 等 Codex 模型名禁止进入 DSH 请求，DeepSeek provider/model 禁止进入 Codex 原生子代理请求，任何 fallback 也不得跨宿主。宿主或能力不明时依次降级为**当前宿主** `host-default` 子代理、当前主会话；禁止猜模型名、禁止启动另一个 AI 软件。跨宿主模型、宿主不支持的推理档位、未验证显式模型分别记 `host_model_mismatch`、`unsupported_effort`、`unverified_model`，不派发。
+
 1. **分类**：按「任务分类与分派」表判定 micro/bounded/complex/architecture/high-risk/review。
 2. **路由**：先识别当前宿主，再使用该宿主自己的能力映射。DSH 调 `baton_route(task_id, task_type)`：只统计最近 30 天、同宿主、同任务类型、可信来源且 model_pool 状态为 verified 的 `attempt_evaluated`；每个候选至少 5 次才自适应。质量差超过 5 个百分点时质量优先；差值不超过 5 个百分点时依次偏好更低平均 Token、再更短平均耗时；样本不足固定返回 `host-default`。Codex、Claude Code、Cursor 不伪造 DSH 模型 ID或可信采样，只做宿主原生档位翻译并记录 `host-default/requested/unknown`。
 3. **分派与记录**：
-   - **DeepSeek Harness**：先用 baton_route 追加 `route_decided` 并取得 route_id；实际分派后调用 `baton_record_actual(phase=started, route_id=...)` 追加 `attempt_started` 并取得 attempt_id；得到验证结果后调用 `phase=evaluated, attempt_id=..., result=succeeded|needs_revision|failed|cancelled`。同一 attempt 只能有一个终态；相同重试幂等，不同终态 fail-closed。只有宿主 descriptor 等可信来源进入自适应与模型榜单。
-   - **统计口径**：只有 started 没有 evaluated 的 attempt 标为 `unarchived`，不进入成功/失败/返修分母；`cancelled` 展示但不进入质量分母；未知 Token/耗时必须保存 `null`，禁止补零或估算。event_id 相同且内容相同为幂等，内容不同为冲突并拒绝覆盖。
+   - **DeepSeek Harness**：先用 baton_route 追加 `route_decided` 并取得 route_id；实际分派后调用 `baton_record_actual(phase=started, route_id=..., actual_model=..., reasoning_effort=...)` 追加 `attempt_started` 并取得 attempt_id；得到验证结果后调用 `phase=evaluated, attempt_id=..., result=succeeded|needs_revision|failed|cancelled`。同一 attempt 只能有一个终态；相同重试幂等，不同终态 fail-closed。只有宿主 descriptor 等可信来源进入自适应与模型榜单。
+   - **轻量工作日志（所有宿主）**：每次真正派发执行代理时，主会话必须立即把 `attempt_started` 追加到 `.baton/local/metrics/YYYY-MM-DD.jsonl`；代理结束后把同一 `attempt_id` 的 `attempt_evaluated` 追加到当天文件。至少记录 `event_id/task_id/task_title/host_id/executor_id/model/reasoning_effort/source/started_at|ended_at/result/duration_ms`。这是 Git 忽略的本机临时账本，不要求在每次派发时重建 HTML。
+   - **固化时机与只增不改**：`完成`、`更新项目文档`、`下班` 三类文档事务都必须把当天本机日志同步到 `docs/ai_memory/agent_metrics/YYYY/MM/runs.jsonl`，然后从月度 runs 重建 `index.html`。月度 runs 只允许物理追加：相同 `event_id` 且内容相同按幂等跳过；相同 `event_id` 但内容不同必须 fail-closed，禁止覆盖或修改既有历史。月度写入与 HTML 生成成功后才能清空对应本机日志。
+   - **统计口径**：主会话在分配时已经知道宿主、执行代理、模型与档位，必须当场写入 started；完成时写入结果、结束时间与宿主提供的准确耗时。未传 `duration_ms` 时用同一 attempt 的 `ended_at - started_at` 结算。只有 started 没有 evaluated 的 attempt 标为 `unarchived`，不进入成功/失败/返修分母；`cancelled` 展示但不进入质量分母。旧记录确实缺失的模型、档位、Token 或耗时显示「未采集」，禁止从任务 owner/type/created_at/updated_at 逆推，禁止生成估算区间冒充已知信息。event_id 相同且内容相同为幂等，内容不同为冲突并拒绝覆盖。
    - **Claude Code**：micro/bounded → 主会话直接做（用当前会话模型）；complex/architecture/high-risk → 用 Claude Code 内置 **Subagents/Task 工具**派子任务，在派发提示词里写明任务范围+检查点+「从这里继续，不重做」；模型档位通过会话内 `/model` 切换实现（简报里写明 recommended 档位供用户确认，切换后实际档位如实记入简报与 Metrics）。actual 记录：主会话知道自己当前模型，但 source 只能记 requested 或 unknown（Claude 宿主不暴露子代理身份），**禁止自报为已核实**。
    - **Codex**：micro/bounded → 主会话直做；complex/architecture/high-risk → 用 Codex 内置子代理/Task 机制派发，规则同上；模型档位通过 Codex 会话配置选择，简报写明 recommended 与实际；actual 同样只记 requested/unknown。
    - **Cursor**：micro/bounded → 主 Agent 直做；复杂任务用 Cursor 的 Agent/子代理机制，或分步引导用户切换模型；实际档位如实记录，无法确认记 unknown。
    - **兜底（所有平台）**：显式 provider/model 路由中未配置或未验证的模型永不使用；宿主原生模式无法核实具体模型时使用 host-default，而不是伪造 verified。provider/额度失败 → 按 fallback 链重派（读检查点+「从这里继续，不重做」）；同根因两次失败 → 停 + 报告。**无法确认实际模型时记 unknown，绝不编造。**
-4. **记录（不造假，所有平台）**：recommended 与 actual 分开记；source 如实标注（requested=主会话分派记录；host_descriptor=宿主身份事件，仅 DSH 可读；unknown=无法确认）。完成后 complete/clock_out 传 actual_model。DSH 一次性子代理的 model 在宿主侧是隐藏设计，continuable 子代理可读 agentModel；无法确认一律记 unknown。**Reviewer 独立性不可由调用者自证**：`reviewer_agent_id` 等参数只是声明（unverified），独立复核的可信身份必须以宿主签发的 session/run/agent/host 事件为准；无法证明独立时该任务保持「未满足独立复核」，不得假装 PASS。
+4. **记录（不造假，所有平台）**：recommended 与 actual 分开记；主会话真实发出的分派配置以 `requested` 记录，宿主进一步确认的执行身份以 `host_descriptor` 记录，完全没有记录才使用 `unknown`。Codex、Claude Code、Cursor、DSH 都在分派时写宿主、执行代理、模型、档位与 started_at，在完成时写 ended_at、result、duration_ms；HTML 只读取这些事实。完成后 complete/clock_out 传 actual_model。**Reviewer 独立性不可由调用者自证**：`reviewer_agent_id` 等参数只是声明（unverified），独立复核的可信身份必须以宿主签发的 session/run/agent/host 事件为准；无法证明独立时该任务保持「未满足独立复核」，不得假装 PASS。
+
+### 无插件宿主的 Metrics 命令
+
+Codex、Claude Code、Cursor 或其它没有 `baton_*` 工具的宿主，使用仓库脚本完成同一协议；模型参数只能来自当前宿主本轮真实分派配置：
+
+```powershell
+node scripts/baton-report.mjs --project <项目绝对路径> --record-start --task-id <任务ID> --task-name <任务名称> --host-id <codex|claude|cursor|其它当前宿主> --executor-id <执行代理ID> --run-id <宿主运行ID> --model <本次请求模型或host-default> --effort <本次请求档位> --source requested
+node scripts/baton-report.mjs --project <项目绝对路径> --record-end --task-id <任务ID> --attempt-id <上一步返回值> --result <succeeded|needs_revision|failed|cancelled> --duration-ms <宿主显示的准确耗时>
+node scripts/baton-report.mjs --project <项目绝对路径> --sync-local
+```
+
+`record-start` 必须在派发动作发生时执行并保存返回的 `attempt_id`；`record-end` 必须在宿主返回执行结果时执行。宿主已经显示准确耗时时必须传 `duration-ms`；只有宿主未提供时，脚本才按同一 attempt 的开始/结束时间计算。`sync-local` 由完成、更新项目文档、下班自动触发，不要求用户手工运行。
 
 ### 宿主原生轻量映射
 
@@ -206,6 +222,7 @@ Baton 版本闭环：安装留版本锚、可检查、可更新。**用户不当
 - **是否派发**：micro 及主会话已掌握全部上下文的 bounded 任务由主会话直接做；可独立搜索、日志整理、隔离测试、自包含编码优先 economy；跨模块复杂逻辑、架构、高风险与独立复核才用 reasoning。预计分派和重新传递上下文的成本不低于收益时不派发。
 - **允许高于主会话档位**：宿主原生子代理接口若明确允许，执行代理可以使用比主会话更高的推理档位。例如 Codex 主会话为 Sol medium 时，可给精简 Context Capsule 的复杂子代理选择 Sol high；这不是权限继承，而是一次独立分派配置。`max` 仅用于 architecture/high-risk/review 中质量优先且历史可信样本证明 high→max 有明显收益的场景；样本不足 5 次时不得仅因“更强”默认升 max。
 - **静默降级链**：指定的宿主原生配置不可用 → 宿主 Auto/默认子代理 → 当前主会话；同一根因失败两次停止。每次降级记录 requested、actual/source 和原因，但不重复发送同一请求，不让用户手工选择 Baton 内部路由参数。
+- **宿主适配表（模型名不跨行）**：Codex → Codex 内置子代理及其本轮可选模型/推理档位；Claude Code → Subagents/Task 本轮支持的 Claude 配置；Cursor → 当前 Agent/子代理本轮支持的 Cursor 配置；DSH → `.baton/config.json` 中 `host_id=dsh + status=verified` 的 provider/model。某一行的模型名称不得出现在另一行的派发参数中。
 
 ## Lean Gate（最小实现决策阶梯）
 
@@ -328,9 +345,11 @@ agent_id/run_id/session_id（不可验证写 unknown）：
 
 ## 任务表格式
 
-| ID | 任务/下一步 | 说明 | 建议 | 确认口令 |
-|---|---|---|---|---|
-| 1 | 推荐事项 | 当前状态与影响 | 推荐 | 回复 `1` |
+**所有需要用户选择、确认、验收或决定下一步的 Baton 回复，都必须在结尾输出任务表**；上班、状态、诊断、阶段结果和完成结果不得退化成只有项目符号。多个独立选项允许用户直接连写编号，例如回复 `1234` 表示按表中 1、2、3、4 全部执行；执行者按编号顺序持久化和处理，不反问复述。没有可选动作时也输出一行状态表，确认口令写“无需回复”。
+
+| ID | 任务 ID | 任务名称 | 说明 | 建议 | 备注 | 确认口令 |
+|---|---|---|---|---|---|---|
+| 1 | DC-YYYYMMDD-NNN | 推荐事项 | 当前状态与影响 | 推荐 | 范围、风险或依赖 | 回复 `1` |
 
 ## 目录结构
 
@@ -442,12 +461,13 @@ docs/ai_memory/                ← 长期真相（Git 同步，跨 AI 通用）
 **Baton 不依赖插件也能用，且不是阉割版**：所有状态文件都是普通 Markdown/JSON，按本规则手工读写即可。插件只是 DSH 上的机械化加速器（自动格式、自动索引、机械核验）；无插件时同一套规则由 AI 手工执行，**平台能力中的通用能力全部保留**。各口令的等价做法：
 
 - **上班啦**：`git branch --show-current` / `git rev-parse HEAD` / `git status --short` 三查 → 读 `current.md`、`handoff_current.md` 末条、`state/tasks.json` 未完成任务 → 按「任务表格式」输出表格；交接末条含「持有中/检查点」则保持只读并报告。
-- **下班啦**：严格按上文四阶段执行并复用一次事实快照；文档事务后调用 `scripts/baton-report.mjs` 刷新月报并输出 generated/old/missing 三态与绝对路径；本地检查+commit 合并为一次 fail-closed 调用，push+ls-remote 合并为一次按退出码串联的网络调用；超过 120 秒主动报告所在阶段。远端 SHA 与本地 HEAD 一致才算完成；命中 protected_paths、allowed_paths、凭据或公开 remote 必须 FAIL。
+- **下班啦**：严格按上文四阶段执行并复用一次事实快照；文档事务后调用 `scripts/baton-report.mjs --sync-local` 追加固化当天临时 Metrics、刷新月报并输出 generated/old/missing 三态与绝对路径；本地检查+commit 合并为一次 fail-closed 调用，push+ls-remote 合并为一次按退出码串联的网络调用；超过 120 秒主动报告所在阶段。远端 SHA 与本地 HEAD 一致才算完成；命中 protected_paths、allowed_paths、凭据或公开 remote 必须 FAIL。无论下班成功或未完成，回复消息的**最后一行**必须原样带出 `统计 HTML：<monthly_html_absolute>`，不得让其它文字或任务表排在该行之后。
 - **继续工作**：读 `current.md` + handoff 末条 + `state/archive_index.json` 最近条目，输出下一步。
 - **保存设计规范 / 记入记忆**：按模板追加 `ui_spec/`、`knowledge/` 文件，并追加 archive_index.json 条目（标题/路径/摘要/关键词/行号）。
 - **查历史**：先在 archive_index.json 里按关键词匹配，再只读命中文件片段；禁止全量读取。
-- **自动模型分派**：规则照常生效——读 `.baton/config.json` 的 routing 任务类型与 `fast/reasoning` 标签，再按「宿主原生轻量映射」翻译为本平台的 `current/economy/reasoning` 能力；分派用本平台的子代理机制（Claude Code 用内置 Subagents/Task，Codex 用内置子代理，Cursor 用 Agent），不复用 DSH 的具体模型 ID。complex/architecture/high-risk 派发时提示词写明范围+检查点+「从这里继续，不重做」。**实际模型记录降级**：主会话知道自己当前模型则记 requested，无法核实子代理实际模型一律记 unknown，禁止编造。
-- **完成 / 记录需求变更 / Git 自然语言**：按「口令」章节的规则手工执行等价动作（更新 tasks.json、overview.md、执行 git 命令）。
+- **自动模型分派**：先识别当前用户实际使用的 AI 宿主，再读 `.baton/config.json` 的 routing 任务类型与 `fast/reasoning` 标签，并仅翻译为该宿主真实提供的能力。Claude Code 只用内置 Subagents/Task 与 Claude 会话模型，Codex 只用内置子代理与 Codex 可选模型，Cursor 只用 Cursor Agent/其可选模型，DSH 只用 DSH 的 `baton_route` 与其模型池；严禁跨宿主复用模型 ID（例如 DSH 分配 Sol/Luna，或 Codex 分配 DeepSeek provider/model）。complex/architecture/high-risk 派发时提示词写明范围+检查点+「从这里继续，不重做」。派发前后必须分别执行上文 `--record-start` / `--record-end`；**实际模型记录降级**：主会话知道本次请求模型则记 requested，无法核实子代理实际身份时 source 不得写 host_descriptor，但不能把主会话已经知道的执行代理、请求模型和档位丢成 unknown。
+- **完成 / 更新项目文档**：按「口令」章节的规则手工更新 tasks.json、overview.md 等文件，并在事务末尾执行 `scripts/baton-report.mjs --project <项目绝对路径> --sync-local`；同步失败时不得清空本机临时日志，也不得宣称统计已固化。
+- **记录需求变更 / Git 自然语言**：按「口令」章节的规则手工执行等价动作（更新 tasks.json、overview.md、执行 git 命令）。
 
 **无插件宿主的主要降级**（与 DSH 插件模式相比）：没有进程级原子锁、宿主签发的用户授权 receipt、可信实际模型身份与 DSH 原生自动派发，也没有自动格式纠错和一键机械核验。文件接力、记忆、Git 闭环与规则型检查仍可按本节执行，但这些人工约束不得描述成插件同级机械保证。
 

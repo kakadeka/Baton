@@ -9,6 +9,7 @@
   "main": "index.mjs",
   "files": [
     "README.md",
+    "README.zh-CN.md",
     "LICENSE",
     "package.json",
     "index.mjs",
