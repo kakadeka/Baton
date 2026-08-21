@@ -605,11 +605,30 @@ export function apply(ctx) {
 
     // 远端 URL 归一化（仅用于比对）：去协议 → 去 userinfo（令牌/用户，错误消息绝不回显）→ scp 形 host:path 转 host/path → 去尾部 .git 与斜杠 → 全小写。
     function normalizeRemoteUrl(url) {
-      let u = String(url || '').trim().toLowerCase()
+      let u = sanitizeRemoteForConfig(url).trim().toLowerCase()
+      // query/fragment 不参与仓库身份；其中也可能携带未枚举名称的凭据。
+      u = u.replace(/[?#].*$/, '')
+      const schemeMatch = /^([a-z][a-z0-9+.-]*):\/\//.exec(u)
+      const scheme = schemeMatch === null ? null : schemeMatch[1]
       u = u.replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
       u = u.replace(/^[^/@]+@/, '')
-      if (/^[^/:]+:[^/]/.test(u)) u = u.replace(':', '/')
+      // 只有无 scheme 的 host:path 才是 scp 形；scheme URL 的 host:port 不能改成 host/port。
+      if (scheme === null && /^[^/:]+:[^/]/.test(u)) u = u.replace(':', '/')
+      const defaultPort = { http: '80', https: '443', ssh: '22', git: '9418' }[scheme]
+      if (defaultPort !== undefined) u = u.replace(new RegExp('^([^/]+):' + defaultPort + '(?=/|$)'), '$1')
       u = u.replace(/\/+$/, '').replace(/\.git$/, '')
+      return u
+    }
+
+    // 写入项目配置前移除 URL 中可能携带的凭据；保留 git@host 这类纯用户名 SSH 形式。
+    function sanitizeRemoteForConfig(url) {
+      let u = String(url || '').trim()
+      // HTTP(S) 的任意 userinfo 都不应进入 tracked config：单段也可能就是访问令牌。
+      u = u.replace(/^(https?:\/\/)[^/@\s]+@/i, '$1')
+      u = u.replace(/^(ssh:\/\/)[^/@\s]+:[^/@\s]+@/i, '$1')
+      // scp 形凭据规则只适用于无 scheme 地址；否则会把 ssh://...:22 误吞成 scp。
+      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) u = u.replace(/^[A-Za-z0-9_.-]+:[^@\s]+@([^@\s:]+:)/, '$1')
+      u = u.replace(/([?&])(access_token|token|password|auth|key)=[^&]*/ig, '$1').replace(/[?&]$/, '')
       return u
     }
     // 内置禁推清单：开源发布仓库。发布只走官方发布脚本，任何项目的日常 push 永不允许指向它。
@@ -969,7 +988,9 @@ export function apply(ctx) {
         if (s === '') continue
         try {
           const r = JSON.parse(s)
-          if (r && r.task_id === taskId && typeof r.actual_model === 'string' && r.actual_model !== '') {
+          // 在 dirty worktree 上生成的证据不绑定该 HEAD 的真实内容，必须拒绝；
+          // 旧证据未带此字段仍按历史兼容处理，显式 true 一律 fail-closed。
+          if (r && r.task_id === taskId && r.worktree_dirty !== true && typeof r.actual_model === 'string' && r.actual_model !== '') {
             const h = typeof r.head === 'string' ? r.head : ''
             if (/^[0-9a-f]{40}$/i.test(h)) {
               const gitNow = await gitSnapshot(rootPath)
@@ -2657,6 +2678,30 @@ export function apply(ctx) {
         for (const h of legacyDocHits) migration.push(h)
         if (migration.length > 0) migration.push('提示：旧资产统一用 scripts/baton-migrate.ps1 迁移（建新文档搬内容→改引用→备份下线），勿手工零散处理')
         const hasGit = await statAt(rootPath, '.git') !== null
+        const initGit = await gitSnapshot(rootPath)
+        let actualOriginUrl = ''
+        if (initGit.remotes.indexOf('origin') !== -1) {
+          const gu = await sh('git remote get-url origin', rootPath)
+          if (gu.exitCode === 0) actualOriginUrl = String(gu.out || '').trim()
+        }
+        let initConfig = await loadConfig(rootPath)
+        let configRepaired = false
+        if (initConfig !== null && initConfig.remotes && initConfig.branch) {
+          const configWasCreated = created.indexOf('.baton/config.json') !== -1
+          const placeholderRemote = String(initConfig.remotes.origin || '') === 'REPLACE_WITH_REMOTE_URL'
+          const mayRepairTemplate = configWasCreated || placeholderRemote
+          if (placeholderRemote && actualOriginUrl !== '') {
+            initConfig.remotes.origin = sanitizeRemoteForConfig(actualOriginUrl)
+            configRepaired = true
+          }
+          if ((mayRepairTemplate || String(initConfig.branch.base || '').trim() === '') && initGit.branch !== '') {
+            if (String(initConfig.branch.base || '') !== initGit.branch) {
+              initConfig.branch.base = initGit.branch
+              configRepaired = true
+            }
+          }
+          if (configRepaired) await writeTextAt(rootPath, '.baton/config.json', JSON.stringify(initConfig, null, 2))
+        }
         const adapters = []
         // 入口段幂等升级：EOL 不敏感比较（Windows CRLF 检出 vs 内联 LF 不得误判为差异）；
         // 段后存在**无标题用户内容**时拒绝自动重写（绝不吞用户规则，报告人工处理）。
@@ -2781,7 +2826,48 @@ export function apply(ctx) {
             }
           }
         }
-        return { ok: true, project_name: name, created, skipped, migration, adapters_created: adapters, skill_mirrored: skillMirrored, git_initialized: hasGit, note: hasGit ? '现在说「上班啦」即可开始；旧文档从未被改动' : '未检测到 .git：请先 git init 并完成首次提交，再使用 Baton（上班/下班依赖 Git）' }
+        initConfig = await loadConfig(rootPath)
+        const initBlocking = []
+        if (!hasGit || initGit.head.length < 7) initBlocking.push('Git 仓库尚无可读 HEAD：先完成首次提交')
+        if (initConfig === null) initBlocking.push('.baton/config.json 缺失或损坏')
+        else {
+          const configuredRemote = initConfig.remotes ? String(initConfig.remotes.origin || '').trim() : ''
+          const configuredBranch = initConfig.branch ? String(initConfig.branch.base || '').trim() : ''
+          if (configuredRemote === '' || configuredRemote === 'REPLACE_WITH_REMOTE_URL') initBlocking.push('config.remotes.origin 仍为占位或空值')
+          if (initGit.remotes.indexOf('origin') === -1) initBlocking.push('Git 未配置 origin，无法闭环下班推送与远端 SHA 核验')
+          else if (actualOriginUrl === '') initBlocking.push('无法读取真实 Git origin URL')
+          else if (configuredRemote !== '' && configuredRemote !== 'REPLACE_WITH_REMOTE_URL' && normalizeRemoteUrl(configuredRemote) !== normalizeRemoteUrl(actualOriginUrl)) initBlocking.push('config.remotes.origin 与真实 Git origin 不一致（保留用户配置，拒绝自动覆盖）')
+          if (configuredBranch === '') initBlocking.push('config.branch.base 为空')
+          else if (initGit.branch !== '' && configuredBranch !== initGit.branch) initBlocking.push('config.branch.base=' + configuredBranch + ' 与当前分支 ' + initGit.branch + ' 不一致')
+        }
+        const initLongDocs = [
+          'docs/ai_memory/index.md', 'docs/ai_memory/current.md', 'docs/ai_memory/commands.md', 'docs/ai_memory/handoff_current.md',
+          'docs/ai_memory/overview.md', 'docs/ai_memory/constraints.md', 'docs/ai_memory/validation_matrix.md',
+          'docs/ai_memory/tasks/task_schema.md', 'docs/ai_memory/tasks/task_todo.md', 'docs/ai_memory/tasks/task_progress.md', 'docs/ai_memory/tasks/task_finished.md',
+          'docs/ai_memory/knowledge/tech_decision.md', 'docs/ai_memory/knowledge/pit_experience.md',
+          'docs/ai_memory/ui_spec/global.md', 'docs/ai_memory/ui_spec/component.md', 'docs/ai_memory/ui_spec/page.md', 'docs/ai_memory/ui_spec/workflow.md',
+        ]
+        for (const rel of initLongDocs) {
+          const c = await readTextAt(rootPath, rel)
+          if (c === null) initBlocking.push(rel + ' 缺失')
+          else if (c.indexOf('【归档分卷索引】') === -1 || c.indexOf('【修订记录】') === -1) initBlocking.push(rel + ' 缺强制结构')
+        }
+        if (migration.length > 0) initBlocking.push('检测到待迁移旧资产：先运行 baton-migrate 并重新初始化验收')
+        const versionAnchor = await readJsonAt(rootPath, '.baton/version.json', null)
+        let reportScript = versionAnchor && typeof versionAnchor.report_script === 'string' && versionAnchor.report_script.trim() !== ''
+          ? await fs.resolve(versionAnchor.report_script).catch(() => null)
+          : null
+        if (reportScript === null && pkgDir !== null) reportScript = await fs.resolve(pkgDir + '/scripts/baton-report.mjs').catch(() => null)
+        const reportExists = reportScript !== null && await fs.stat(reportScript).then(() => true).catch(() => false)
+        if (!reportExists) initBlocking.push('无法定位 scripts/baton-report.mjs，不能保证无插件下班生成月报')
+        const ready = initBlocking.length === 0
+        return {
+          ok: ready, overall: ready ? 'PASS' : 'FAIL', project_name: name, created, skipped, migration,
+          adapters_created: adapters, skill_mirrored: skillMirrored, git_initialized: hasGit,
+          config_repaired: configRepaired, report_script: reportExists ? String(reportScript) : null,
+          blocking: initBlocking,
+          note: ready ? '初始化后验通过；现在说「上班啦」即可开始' : 'Baton init 已生成安全脚手架，但初始化后验未通过，不得宣称完成',
+        }
       },
     }))
 
@@ -2924,24 +3010,10 @@ export function apply(ctx) {
         // 假 Reviewer 检测改为身份判定（agent/session 同源 = 假 Reviewer），模型名只用于统计。
         const tasksDoc = await readJsonAt(rootPath, 'docs/ai_memory/state/tasks.json', { tasks: [] })
         const completedIds = (tasksDoc.tasks || []).filter((t) => t.status === 'completed').map((t) => t.id)
-        const evIndexRaw = (await readTextAt(rootPath, 'docs/ai_memory/state/evidence.jsonl')) || ''
         for (const tid of completedIds) {
-          // 优先 Git 内索引（跨机可见）；本机详细层作为补充
-          const ev = evIndexRaw + '\n' + ((await readTextAt(rootPath, '.baton/evidence/' + tid + '.jsonl')) || '')
-          let evOk = false
-          for (const line of ev.split('\n')) {
-            const s = line.trim()
-            if (s === '') continue
-            try {
-              const r = JSON.parse(s)
-              if (r && r.task_id === tid && typeof r.actual_model === 'string' && r.actual_model !== '') {
-                // 证据行必须绑定 source SHA（40hex）且为当前 HEAD 的祖先/相等——旧 SHA/无绑定视为无效
-                const h = typeof r.head === 'string' ? r.head : ''
-                if (/^[0-9a-f]{40}$/i.test(h) && (h === git.head || await isAncestor(h, git.head, rootPath))) { evOk = true; break }
-              }
-            } catch (e) { /* 坏行跳过 */ }
-          }
-          need(evOk, '任务 ' + tid + ' 有有效执行证据（source SHA 绑定且为 HEAD 祖先，跨机可见）', evOk ? '证据行有效' : '无有效证据：baton_record_actual 记录执行模型与来源后再验收（证据必须绑定当前提交）')
+          // 与 direct accept 共用同一证据门，避免 worktree_dirty 等安全规则分叉。
+          const evidenceGate = await taskEvidenceGate(rootPath, tid)
+          need(evidenceGate.evOk, '任务 ' + tid + ' 有有效执行证据（source SHA 绑定且为 HEAD 祖先，跨机可见）', evidenceGate.evOk ? '证据行有效' : '无有效证据：baton_record_actual 记录执行模型与来源后再验收（证据必须绑定当前提交）')
         }
         // completed 任务的 task_finished 条目的「证据」行不得为占位（DoD 证据需真实结果）
         const finishedDoc = (await readTextAt(rootPath, 'docs/ai_memory/tasks/task_finished.md')) || ''
@@ -3446,7 +3518,7 @@ export function apply(ctx) {
       return {
         'docs/ai_memory/index.md': '# ' + name + ' AI 记忆索引\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n- 分卷规则：单文件超过 3MB 时按完整条目或章节分卷，主文件保留当前有效内容、摘要和读取顺序；分卷只生成清单，用户确认后再归档。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立记忆索引。 |\n\n更新时间：' + todayLocal() + '\n\n## 开工必读\n\n按顺序读取：\n\n1. `current.md`（当前工作摘要）\n2. `handoff_current.md` 末条（最近交接事实）\n3. `tasks/task_progress.md`（进行中任务）\n4. `tasks/task_todo.md`（待办）\n5. `overview.md`（项目总览）\n6. 当前任务关联的需求、协议、原型或文档\n\n## 当前主线\n\n- 当前任务：（无）\n- 当前阶段：（未开始）\n- 唯一下一步：说「上班啦」开始工作\n\n## 权威入口\n\n- 项目总览与需求清单：`overview.md`\n- 编码与开发红线：`constraints.md`\n- 用户口令：`commands.md`\n- 交接审计：`handoff_current.md`\n- 验证矩阵：`validation_matrix.md`\n- 任务：`tasks/`\n- 技术决策：`knowledge/tech_decision.md`\n- 坑点经验：`knowledge/pit_experience.md`\n- 设计规范：`ui_spec/`\n- 需求基线：`requirements/`\n- 日报：`daily_log/`\n- 历史索引（机器层）：`state/archive_index.json`\n\n## 未来新文档命名规则\n\n- `current.md`、`handoff_current.md`、`index.md`、`commands.md` 与 `state/` 下结构化文件保持固定名称。\n- 新任务/计划/决策/坑点文档有稳定 ID 时以 ID 开头，再接简短主题和类型，例如 `DC-YYYYMMDD-NNN_<topic>_plan.md`；日报使用 `daily_YYYY-MM-DD.md`。\n- 既有历史文件保留原名，不为统一外观批量改名；合法迁移必须保持稳定 ID，并同步引用与 `archive_index.json`。\n',
         'docs/ai_memory/current.md': '# 当前工作\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立当前工作摘要。 |\n\n> 修订表规则：只保留最近 3 个日期、每个日期一行；同日再次更新覆盖当日行，不向下堆叠。\n\n## 当前事实（简写，随生命周期更新）\n\n- 当前项目、分支和状态只读取下方托管投影；Git HEAD 在生命周期安全节点实时读取，本文件不保存会自我过期的 HEAD 字符串。\n- 当前基础设施工作：（无）\n- 当前真实阻断：（无）\n- 业务主线 `DC-YYYYMMDD-NNN`：（未开始；详细背景见其计划及 `handoff_current.md`）\n- 只有确需历史时才查询 `state/archive_index.json`，随后读取命中的文件片段；普通任务禁止扫描全部历史。\n\n<!-- BATON:CANONICAL-PROJECTION:BEGIN -->\n- Task: NONE\n- Phase: idle\n- Next step: NONE\n- Branch: NONE\n- HEAD: LIVE-READ\n<!-- BATON:CANONICAL-PROJECTION:END -->\n',
-        'docs/ai_memory/commands.md': '# Baton 用户口令\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立口令说明。 |\n\n用户只需要自然描述任务，以及以下口令。Git、文档、记忆与收尾的机械步骤由 Baton 自动完成。\n\n## `上班啦`\n\n自动核对并 fetch Git（ff-only）、恢复未完成任务、读取交接与待办、生成任务表。推荐项为 ID 1，用户只回复 `1` 即可继续。\n\n## `下班啦`\n\n完整收尾：验证 → 更新文档（日报/交接/current/索引）→ 结算当日 Metrics → commit → push → 远端 SHA 核验 → 释放 ownership。未做远端 SHA 核验不得报「下班完成」。\n\n## `继续工作`（别名 `接手继续`）\n\n跨会话/跨电脑恢复上下文：从 Git、canonical state、交接的唯一下一步继续，不需要复述整个项目。\n\n## `更新项目文档`\n\n中途存档：把当前进度增量写入日报/current/handoff 检查点后停止，不 commit/push。\n\n## `保存设计规范`\n\n只保存用户已确认、可复用的设计事实，按全局/组件/页面/工作流分类写入 `ui_spec/`，并核对归属路径。\n\n## `完成`\n\n关闭当前任务、记录完成证据、给下一步（不等于下班）。\n\n## `记入记忆`\n\n把决策/坑点/问题写入 `knowledge/` 并自动建索引。\n\n## `记录需求变更`\n\n新增/修改/移除需求时，同步更新 `overview.md` 需求清单并追加一行变更记录。\n\n## `Baton init`\n\n初始化项目实例：生成文档骨架、配置与三端薄适配器（AGENTS.md / CLAUDE.md / .cursorrules / .cursor/rules/baton.mdc）。\n\n## 普通自然语言任务\n\n需要选择时统一输出：\n\n| ID | 任务/下一步 | 说明 | 建议 | 确认口令 |\n| --- | --- | --- | --- | --- |\n| 1 | 推荐事项 | 当前状态与影响 | 推荐 | 回复 `1` |\n\n用户无需执行 PowerShell、Git、hash 或 approval 命令。\n',
+        'docs/ai_memory/commands.md': '# Baton 用户口令\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立口令说明。 |\n\n用户只需要自然描述任务，以及以下口令。Git、文档、记忆与收尾的机械步骤由 Baton 自动完成。\n\n## `上班啦`\n\n自动核对并 fetch Git（ff-only）、恢复未完成任务、读取交接与待办、生成任务表。推荐项为 ID 1，用户只回复 `1` 即可继续。\n\n## `下班啦`\n\n完整收尾：验证 → 更新文档（日报/交接/current/索引）→ 结算当日 Metrics → commit → push → 远端 SHA 核验 → 释放 ownership。未做远端 SHA 核验不得报「下班完成」。\n\n## `继续工作`（别名 `接手继续`）\n\n跨会话/跨电脑恢复上下文：从 Git、canonical state、交接的唯一下一步继续，不需要复述整个项目。\n\n## `更新项目文档`\n\n中途存档：把当前进度增量写入日报/current/handoff 检查点后停止，不 commit/push。\n\n## `保存设计规范`\n\n只保存用户已确认、可复用的设计事实，按全局/组件/页面/工作流分类写入 `ui_spec/`，并核对归属路径。\n\n## `完成`\n\n关闭当前任务、记录完成证据、给下一步（不等于下班）。\n\n## `记入记忆`\n\n把决策/坑点/问题写入 `knowledge/` 并自动建索引。\n\n## `记录需求变更`\n\n新增/修改/移除需求时，同步更新 `overview.md` 需求清单并追加一行变更记录。\n\n## `Baton init`\n\n初始化项目实例：生成文档骨架、配置与三端薄适配器（AGENTS.md / CLAUDE.md / .cursorrules / .cursor/rules/baton.mdc）。\n\n## `修复 Baton`\n\n只修复 Baton 框架接入，不修改业务代码：更新官方 Baton → 重装用户级与当前项目级 Skill → 必要时运行不删除历史的迁移 → 新会话执行 `Baton init` 与 Doctor 后验。官方尚未发布对应修复时必须停止并报告，禁止在业务项目维护 Baton 源码副本。\n\n## 普通自然语言任务\n\n需要选择时统一输出：\n\n| ID | 任务/下一步 | 说明 | 建议 | 确认口令 |\n| --- | --- | --- | --- | --- |\n| 1 | 推荐事项 | 当前状态与影响 | 推荐 | 回复 `1` |\n\n用户无需执行 PowerShell、Git、hash 或 approval 命令。\n',
         'docs/ai_memory/handoff_current.md': '# 交接记录\n\n## 【归档分卷索引】\n\n- 当前文件约 0.5KB，未达到 3MB 分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立交接记录。 |\n\n## 交接条目模板（追加到文件末尾，保持最新在末）\n\n```markdown\n### HO-YYYYMMDD-HHMM-<Agent>｜下班收尾｜<关键词>\n- 时间：YYYY-MM-DD HH:MM（东八区；Agent = Cursor / Codex / Claude / DeepSeek / workbuddy）\n- 交接状态：<状态>\n- 任务 ID / 状态：\n- 分支 / HEAD：\n- 实际修改文件：\n- 已完成 / 尚未完成：\n- 已验证（命令 → 结果）：\n- 未验证项及原因：\n- 唯一下一步：\n- 阻塞与风险：\n- 凭据检查：未记录敏感信息\n```\n',
         'docs/ai_memory/overview.md': '# ' + name + ' 项目总览（Baton 权威项目卷）\n\n> 本文件是项目的"记性本"：目标、需求、技术栈、功能点都记在这里。\n> **铁律**：新增/修改/移除需求时，必须同步更新「需求清单」并在「变更记录」追加一行；历史只追加，不覆盖。\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立项目总览。 |\n\n## 一句话定义\n\n（待填：这个项目做什么，一句话）\n\n## 项目目标\n\n- 项目名：' + name + '\n- 为什么做这个项目：（待填）\n- 成功标准：（待填）\n\n## 需求清单\n\n| 编号 | 需求 | 状态 | 说明 |\n|---|---|---|---|\n| RQ-001 | （待填） | 规划中 | （待填） |\n\n> 状态：规划中 / 进行中 / 已实现 / 已移除（移除见变更记录）\n\n## 技术栈\n\n- 语言/框架：（待填）\n- 关键依赖：（待填）\n- 运行环境：（待填）\n\n## 功能点\n\n- （待填，按模块列出）\n\n## 架构概要\n\n- （待填：模块职责、进程边界、数据流；改变冻结点须经确认并记录）\n\n## 变更记录\n\n| 日期 | 变更内容 | 类型 | 原因/备注 |\n|---|---|---|---|\n| ' + todayLocal() + ' | 创建项目总览 | 新建 | Baton init |\n',
         'docs/ai_memory/constraints.md': '# 编码与开发红线（冻结点）\n\n## 【归档分卷索引】\n\n- 当前文件未达到分卷阈值；当前无归档分卷。\n\n## 【修订记录】\n\n| 日期 | 修改人 | 变更概要 |\n| --- | --- | --- |\n| ' + todayLocal() + ' | ' + initAgent + ' | Baton init 建立红线清单。 |\n\n## 硬性红线\n\n除非任务明确授权，任何执行者不得静默改变：\n\n- 顶层模块职责与进程边界\n- 协议/接口/状态机\n- 隐私与凭据红线\n- 依赖版本与发布方式\n\n## 处理流程\n\n发现必须改变冻结点时：停止相关改动 → 生成检查点 → 退回架构负责人/用户确认，确认后在此追加一行变更记录。\n\n## 文档约束\n\n- 所有长期 md 文件必须保留【归档分卷索引】与【修订记录】两个区块；缺失时先补齐再写入。\n- 单文件超过 3MB 时按完整条目或章节分卷，主文件保留当前有效内容、摘要和读取顺序。\n- 事实优先级：Git/真实文件/新鲜验证 > state/*.json > 交接/日报 > 聊天自述。\n- 历史只增不改；危险 Git（force push/reset --hard/危险 clean/未授权 rebase）禁止。\n- 人读时间一律东八区 `YYYY-MM-DD HH:MM`；JSON/metrics 可用 ISO。\n- 修订记录「修改人」与交接 HO 执行者只允许：Cursor / Codex / Claude / DeepSeek / workbuddy；识别不出写「未知」；禁止写 Baton。\n- 标题与修订概要必须含关键词；禁止空标题「中途存档」「下班收尾」「更新当前工作摘要」。\n- `current.md` 修订表只保留最近 3 个日期、每个日期一行（同日覆盖不堆叠）；任务防丢失靠 task_todo.md / task_progress.md / state/tasks.json。\n',

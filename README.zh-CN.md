@@ -243,6 +243,7 @@ git status
 | <code>下班啦</code> | 验证、记录、提交、推送，并核对远端 SHA |
 | <code>检查更新</code> | 只读检查 Baton 是否有新版 |
 | <code>更新 Baton</code> | 经确认后更新，并核对是否真的生效 |
+| <code>修复 Baton</code> | 更新官方 Baton，并重装当前项目镜像、迁移骨架、执行 init/Doctor 后验；不修改业务代码 |
 
 英文环境可以使用 <code>clock in</code>、<code>continue work</code>、<code>complete task</code>、<code>clock out</code> 等对应口令。
 
@@ -306,6 +307,8 @@ Codex、Cursor、Claude Code 会读取项目里的 Skill 和 <code>docs/ai_memor
 
 最省心：在 AI 聊天框说 <code>检查更新</code>。确认有新版后再说 <code>更新 Baton</code>。
 
+如果某个业务项目遇到已由 Baton 官方修复的 Bug，直接在该项目聊天框说 <code>修复 Baton</code>。Baton 会更新官方来源，重装用户级和当前项目级 Skill，必要时做不删除历史的迁移，然后执行 <code>Baton init</code> 与 Doctor 后验。业务项目不应复制、修改或维护 Baton 源码；如果官方还没有包含修复的新版本，正确结果是等待发布，而不是现场打补丁。
+
 想自己更新也可以在终端运行：
 
 ~~~powershell
@@ -313,7 +316,7 @@ git -C "$HOME/Baton" pull --ff-only
 & "$HOME/Baton/scripts/baton-install.ps1" -Scope User
 ~~~
 
-更新后新建 AI 会话；DSH 更新插件后重启对应 profile。
+更新后新建 AI 会话；DSH 更新插件后重启对应 profile。只有全局 Skill、项目 Skill 镜像、项目版本锚、报告脚本路径和 init/Doctor 都对齐，才算更新完成。
 
 ### 项目级安全卸载
 

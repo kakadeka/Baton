@@ -32,6 +32,37 @@ $ErrorActionPreference = 'Stop'
 function Step($m) { Write-Host "==> $m" }
 function Ok($m) { Write-Host "    ok: $m" }
 
+function Sanitize-RemoteUrlForConfig([string]$url) {
+  $u = ([string]$url).Trim()
+  # HTTP(S) 任意 userinfo（含单段 token@host）都不得写入 tracked config。
+  $u = $u -replace '^(https?://)[^/@\s]+@', '$1'
+  $u = $u -replace '^(ssh://)[^/@\s]+:[^/@\s]+@', '$1'
+  if ($u -notmatch '^[a-z][a-z0-9+.-]*://') {
+    $u = $u -replace '^[A-Za-z0-9_.-]+:[^@\s]+@([^@\s:]+:)', '$1'
+  }
+  $u = $u -replace '([?&])(access_token|token|password|auth|key)=[^&]*', '$1'
+  $u = $u -replace '[?&]$', ''
+  return $u
+}
+
+function Normalize-RemoteUrlForCompare([string]$url) {
+  $u = (Sanitize-RemoteUrlForConfig $url).ToLowerInvariant()
+  $u = $u -replace '[?#].*$', ''
+  $scheme = ''
+  if ($u -match '^([a-z][a-z0-9+.-]*)://') { $scheme = $Matches[1] }
+  $u = $u -replace '^[a-z][a-z0-9+.-]*://', ''
+  $u = $u -replace '^[^/@]+@', ''
+  if (-not $scheme -and $u -match '^[^/:]+:[^/]') { $u = $u -replace ':', '/' }
+  $defaultPorts = @{ http = '80'; https = '443'; ssh = '22'; git = '9418' }
+  if ($scheme -and $defaultPorts.ContainsKey($scheme)) {
+    $port = $defaultPorts[$scheme]
+    $u = $u -replace ('^([^/]+):' + [regex]::Escape($port) + '(?=/|$)'), '$1'
+  }
+  $u = $u -replace '/+$', ''
+  $u = $u -replace '\.git$', ''
+  return $u
+}
+
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $SkillSource = Join-Path $RepoRoot 'skills\baton\SKILL.md'
 $TplMemory = Join-Path $RepoRoot 'templates\ai_memory'
@@ -64,6 +95,7 @@ function Get-BatonVersionInfo($repoRoot) {
     source        = $source
     version       = $version
     sha           = $sha
+    report_script = if (Test-Path (Join-Path $repoRoot 'scripts\baton-report.mjs')) { (Resolve-Path (Join-Path $repoRoot 'scripts\baton-report.mjs')).Path } else { $null }
     installed_at  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
     last_check_at = $null
   }
@@ -117,6 +149,32 @@ if (-not (Test-Path $ProjectRoot)) { throw "项目目录不存在：$ProjectRoot
 if ([string]::IsNullOrWhiteSpace($ProjectName)) { $ProjectName = Split-Path $ProjectRoot -Leaf }
 if ($DryRun) { Write-Host "    (DryRun 模式：以下仅预览)" }
 
+# 现有 Git 项目优先以真实 origin 与当前分支初始化配置。探测失败不猜值，
+# 由末尾初始化后验明确阻断，避免把模板占位符包装成“安装完成”。
+$hasGit = Test-Path (Join-Path $ProjectRoot '.git')
+$detectedBranch = ''
+$detectedRemote = ''
+if ($hasGit) {
+  try {
+    $b = git -C $ProjectRoot branch --show-current 2>$null
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($b)) { $detectedBranch = $b.Trim() }
+  } catch { }
+  try {
+    $r = git -C $ProjectRoot remote get-url origin 2>$null
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($r)) { $detectedRemote = $r.Trim() }
+  } catch { }
+}
+if ([string]::IsNullOrWhiteSpace($RemoteUrl) -and -not [string]::IsNullOrWhiteSpace($detectedRemote)) {
+  $RemoteUrl = $detectedRemote
+}
+if (-not [string]::IsNullOrWhiteSpace($RemoteUrl)) {
+  $sanitizedRemote = Sanitize-RemoteUrlForConfig $RemoteUrl
+  if ($sanitizedRemote -ne $RemoteUrl) {
+    Write-Host "    ⚠ RemoteUrl 含凭据已剥离（凭据绝不写入 config.json），请用 gh/ssh 提供认证"
+  }
+  $RemoteUrl = $sanitizedRemote
+}
+
 $created = @(); $skipped = @(); $migration = @()
 
 # 1) docs/ai_memory 记忆骨架（幂等：已存在则跳过）
@@ -154,28 +212,14 @@ if (-not (Test-Path $configTarget)) {
     $nameJson = ($ProjectName | ConvertTo-Json -Compress)
     $cfg = $cfg.Replace('"PROJECT_NAME"', $nameJson)
     if ($RemoteUrl) {
-      # 凭据绝不入库：只剥「含冒号」的 userinfo（user:token@ 是凭据；
-      # git@host 纯用户名是账号不是凭据，保留）。覆盖 https/ssh/scp 三种形式与凭据类查询参数。
-      if ($RemoteUrl -match '^https?://[^/@\s]+:[^/@\s]+@') {
-        $RemoteUrl = $RemoteUrl -replace '^https?://[^/@\s]+:[^/@\s]+@', 'https://'
-        Write-Host "    ⚠ RemoteUrl 含凭据已剥离（凭据绝不写入 config.json），请用 gh/ssh 提供认证"
-      }
-      if ($RemoteUrl -match '^ssh://[^/@\s]+:[^/@\s]+@') {
-        $RemoteUrl = $RemoteUrl -replace '^ssh://[^/@\s]+:[^/@\s]+@', 'ssh://'
-        Write-Host "    ⚠ RemoteUrl 含凭据已剥离（凭据绝不写入 config.json），请用 ssh key 提供认证"
-      }
-      # SCP 形式（无 scheme）：user:password@host:path → 剥 userinfo 保留 host:path
-      if ($RemoteUrl -match '^[A-Za-z0-9_.-]+:[^@\s]+@[^@\s:]+:') {
-        $RemoteUrl = $RemoteUrl -replace '^[A-Za-z0-9_.-]+:[^@\s]+@', ''
-        Write-Host "    ⚠ RemoteUrl 含凭据已剥离（凭据绝不写入 config.json），请用 ssh key 提供认证"
-      }
-      if ($RemoteUrl -match '[?&](access_token|token|password|auth|key)=[^&]*') {
-        $RemoteUrl = $RemoteUrl -replace '[?&](access_token|token|password|auth|key)=[^&]*', ''
-        Write-Host "    ⚠ RemoteUrl 查询参数含凭据已剥离，请用 gh/ssh 提供认证"
-      }
+      # RemoteUrl 已在统一入口通过 Sanitize-RemoteUrlForConfig 清洗；此处禁止再做分叉正则。
       # JSON 安全写入：URL 必须经 JSON 转义后塞进值位，杜绝反斜杠/引号破坏 JSON
       $remoteJson = ($RemoteUrl | ConvertTo-Json -Compress)
       $cfg = $cfg.Replace('"REPLACE_WITH_REMOTE_URL"', $remoteJson)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($detectedBranch)) {
+      $branchJson = ($detectedBranch | ConvertTo-Json -Compress)
+      $cfg = $cfg.Replace('"base": "master"', ('"base": ' + $branchJson))
     }
     [System.IO.File]::WriteAllText($configTarget, $cfg, (New-Object System.Text.UTF8Encoding $false))
     $created += '.baton/config.json'
@@ -203,6 +247,13 @@ if (-not (Test-Path $configTarget)) {
   }
   $tplObj = Get-Content $TplConfig -Raw -Encoding UTF8 | ConvertFrom-Json
   Merge-TplInto $cfgObj $tplObj
+  $placeholderRemote = $cfgObj.remotes -and ([string]$cfgObj.remotes.origin -eq 'REPLACE_WITH_REMOTE_URL')
+  if ($placeholderRemote -and -not [string]::IsNullOrWhiteSpace($RemoteUrl)) {
+    $cfgObj.remotes.origin = $RemoteUrl
+    if (-not [string]::IsNullOrWhiteSpace($detectedBranch)) { $cfgObj.branch.base = $detectedBranch }
+  } elseif ([string]::IsNullOrWhiteSpace([string]$cfgObj.branch.base) -and -not [string]::IsNullOrWhiteSpace($detectedBranch)) {
+    $cfgObj.branch.base = $detectedBranch
+  }
   $mergedJson = $cfgObj | ConvertTo-Json -Depth 10
   if (-not $DryRun) {
     if (($mergedJson -replace '\s', '') -ne ($cfgRaw -replace '\s', '')) {
@@ -397,9 +448,47 @@ if ($DryRun) { Step "将生成 .baton/manifest.json（managed 文件 hash 清单
   $created += '.baton/manifest.json（managed hash 清单）'
 }
 
-$hasGit = Test-Path (Join-Path $ProjectRoot '.git')
 Write-Host ""
 if ($DryRun) { Write-Host "DryRun 完成：以上为将要执行的操作，未写任何文件。"; exit 0 }
+
+# 初始化完成门禁（等价 Doctor 的接入子集）：Git、配置、分支、长期文档结构、
+# 无插件 Metrics 脚本位置必须全部可用。脚手架可以已写入，但不得假报完成。
+$initBlocking = @()
+$finalCfg = $null
+try { $finalCfg = Get-Content $configTarget -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $initBlocking += '.baton/config.json 缺失或损坏' }
+if (-not $hasGit) { $initBlocking += '未检测到 Git 仓库' }
+else {
+  $finalHead = git -C $ProjectRoot rev-parse --verify HEAD 2>$null
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($finalHead)) { $initBlocking += 'Git 仓库尚无可读 HEAD：先完成首次提交' }
+  if ([string]::IsNullOrWhiteSpace($detectedRemote)) { $initBlocking += 'Git 未配置 origin，无法闭环下班推送与远端 SHA 核验' }
+}
+if ($null -ne $finalCfg) {
+  if ([string]::IsNullOrWhiteSpace([string]$finalCfg.remotes.origin) -or [string]$finalCfg.remotes.origin -eq 'REPLACE_WITH_REMOTE_URL') { $initBlocking += 'config.remotes.origin 仍为占位或空值' }
+  elseif (-not [string]::IsNullOrWhiteSpace($detectedRemote) -and (Normalize-RemoteUrlForCompare ([string]$finalCfg.remotes.origin)) -ne (Normalize-RemoteUrlForCompare $detectedRemote)) { $initBlocking += 'config.remotes.origin 与真实 Git origin 不一致（保留用户配置，拒绝自动覆盖）' }
+  if ([string]::IsNullOrWhiteSpace([string]$finalCfg.branch.base)) { $initBlocking += 'config.branch.base 为空' }
+  elseif (-not [string]::IsNullOrWhiteSpace($detectedBranch) -and [string]$finalCfg.branch.base -ne $detectedBranch) { $initBlocking += "config.branch.base=$($finalCfg.branch.base) 与当前分支 $detectedBranch 不一致" }
+}
+$longDocs = @(
+  'index.md','current.md','commands.md','handoff_current.md','overview.md','constraints.md','validation_matrix.md',
+  'tasks\task_schema.md','tasks\task_todo.md','tasks\task_progress.md','tasks\task_finished.md',
+  'knowledge\tech_decision.md','knowledge\pit_experience.md',
+  'ui_spec\global.md','ui_spec\component.md','ui_spec\page.md','ui_spec\workflow.md'
+)
+foreach ($rel in $longDocs) {
+  $p = Join-Path $ProjectRoot ('docs\ai_memory\' + $rel)
+  if (-not (Test-Path $p)) { $initBlocking += "缺少长期文档 docs/ai_memory/$($rel.Replace('\','/'))"; continue }
+  $c = Get-Content $p -Raw -Encoding UTF8
+  if ($c -notmatch '【归档分卷索引】' -or $c -notmatch '【修订记录】') { $initBlocking += "长期文档结构不完整 docs/ai_memory/$($rel.Replace('\','/'))" }
+}
+$reportScript = Join-Path $RepoRoot 'scripts\baton-report.mjs'
+if (-not (Test-Path $reportScript)) { $initBlocking += "缺少 Metrics 报告脚本 $reportScript" }
+if ($initBlocking.Count -gt 0) {
+  Write-Host "项目级安装未通过初始化后验 ❌"
+  $initBlocking | ForEach-Object { Write-Host "  - $_" }
+  Write-Host "  报告脚本：$reportScript"
+  Write-Host "  脚手架已安全写入；修复阻断项后重跑安装或执行 Baton init 验收。"
+  exit 1
+}
 Write-Host "项目级安装完成 ✅"
 Write-Host "  新建：$($created.Count) 项（$($created -join '、')）"
 if ($skipped.Count -gt 0) { Write-Host "  跳过（已存在）：$($skipped -join '、')" }
@@ -413,5 +502,6 @@ if (-not $hasGit) {
   Write-Host "   git remote add origin <你的远端地址>   # 如有远端"
   Write-Host "   git push -u origin master              # 如有远端"
 } else {
-  Write-Host "已检测到 .git。现在到项目里说「上班啦」验证即可。"
+  Write-Host "已检测到 .git，初始化后验通过。现在到项目里说「上班啦」验证即可。"
+  Write-Host "Metrics 报告脚本：$reportScript"
 }

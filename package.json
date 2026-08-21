@@ -1,6 +1,6 @@
 {
   "name": "@kakadeka/dsh-baton",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "description": "Baton 项目接力协作系统 —— DeepSeek Harness 组合包（19 个 baton_* 工具）",
   "repository": {
     "type": "git",

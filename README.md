@@ -1,4 +1,4 @@
-<!-- baton-src: README.zh-CN.md sha256:718df7f0a379 status:current -->
+<!-- baton-src: README.zh-CN.md sha256:3bb6f7a34774 status:current -->
 
 # 🥁 Baton — Switch AI, Not Your Project Memory
 
@@ -245,6 +245,7 @@ Send these to the **AI chat**, not the terminal.
 | <code>clock out</code> | Verifies, records, commits, pushes, and checks the remote SHA |
 | <code>check update</code> | Checks for a Baton update without changing anything |
 | <code>update baton</code> | Updates after confirmation, then verifies the installed version |
+| <code>repair Baton</code> | Updates official Baton, reinstalls project mirrors, migrates the scaffold safely, and runs init/Doctor checks without changing business code |
 
 Chinese commands such as <code>上班啦</code>, <code>继续工作</code>, and <code>下班啦</code> are equivalent.
 
@@ -308,6 +309,8 @@ The project memory and workflow are shared. The automation and mechanical guaran
 
 The easy route: say <code>check update</code> in AI chat. If an update exists, say <code>update baton</code>.
 
+If a business project hits a bug already fixed upstream, say <code>repair Baton</code> in that project's AI chat. Baton updates the official source, reinstalls the user-level and current-project Skills, runs a non-destructive migration when needed, then runs <code>Baton init</code> and Doctor checks. A business project must not copy, patch, or maintain Baton source code. If no official release contains the fix yet, the correct result is to wait for that release instead of applying a local framework patch.
+
 To update manually in the terminal:
 
 ~~~powershell
@@ -315,7 +318,7 @@ git -C "$HOME/Baton" pull --ff-only
 & "$HOME/Baton/scripts/baton-install.ps1" -Scope User
 ~~~
 
-Open a new AI session afterward. Restart the DSH profile after updating its plugin.
+Open a new AI session afterward. Restart the DSH profile after updating its plugin. The update is complete only when global Skills, project mirrors, the project version anchor, the report-script path, and init/Doctor checks all agree.
 
 ### Safe project uninstall
 

@@ -23,6 +23,28 @@ $ErrorActionPreference = 'Stop'
 function Step($m) { Write-Host "==> $m" }
 function Ok($m) { Write-Host "    ok: $m" }
 
+function Ensure-LongDocStructure([string]$path, [string]$relativePath) {
+  if (-not (Test-Path $path)) { return }
+  $content = Get-Content $path -Raw -Encoding UTF8
+  $missingArchive = $content -notmatch '【归档分卷索引】'
+  $missingRevision = $content -notmatch '【修订记录】'
+  if (-not $missingArchive -and -not $missingRevision) { return }
+  if ($DryRun) {
+    Step "  (DryRun) 将补齐 $relativePath 的强制结构"
+    return
+  }
+  $lines = [regex]::Split($content, "`r?`n")
+  $title = if ($lines.Count -gt 0 -and $lines[0] -match '^#\s') { $lines[0] } else { '# 迁移文档' }
+  $bodyStart = if ($lines.Count -gt 0 -and $lines[0] -match '^#\s') { 1 } else { 0 }
+  $body = if ($lines.Count -gt $bodyStart) { ($lines[$bodyStart..($lines.Count - 1)] -join "`n").TrimStart() } else { '' }
+  $insert = @()
+  if ($missingArchive) { $insert += "## 【归档分卷索引】`n`n- 当前文件未达到分卷阈值；当前无归档分卷。" }
+  if ($missingRevision) { $insert += "## 【修订记录】`n`n| 日期 | 修改人 | 变更概要 |`n| --- | --- | --- |`n| $(Get-Date -Format 'yyyy-MM-dd') | Codex | Baton 迁移补齐长期文档强制结构。 |" }
+  $newContent = $title + "`n`n" + ($insert -join "`n`n") + $(if ($body -ne '') { "`n`n" + $body } else { '' }) + "`n"
+  [System.IO.File]::WriteAllText($path, $newContent, (New-Object System.Text.UTF8Encoding $false))
+  Ok "$relativePath 已补齐归档分卷索引/修订记录，原正文保留"
+}
+
 if (-not (Test-Path $ProjectRoot)) { throw "项目目录不存在：$ProjectRoot" }
 $backup = Join-Path $ProjectRoot $BackupDir
 
@@ -156,7 +178,21 @@ foreach ($ef in $entryFiles) {
   if ($efc -match $entryRefPattern) { $entryOldRefs += $ef }
 }
 if ($entryOldRefs.Count -gt 0) { Write-Host "    入口旧引用: $($entryOldRefs -join ', ')" }
-if ($oldSkills.Count -eq 0 -and $oldDocs.Count -eq 0 -and -not $ebwExists -and $entryOldRefs.Count -eq 0) { Write-Host "    未发现旧资产，无需迁移。"; exit 0 }
+$preflightLongDocs = @(
+  'docs\ai_memory\index.md','docs\ai_memory\current.md','docs\ai_memory\commands.md','docs\ai_memory\handoff_current.md',
+  'docs\ai_memory\overview.md','docs\ai_memory\constraints.md','docs\ai_memory\validation_matrix.md',
+  'docs\ai_memory\tasks\task_schema.md','docs\ai_memory\tasks\task_todo.md','docs\ai_memory\tasks\task_progress.md','docs\ai_memory\tasks\task_finished.md',
+  'docs\ai_memory\knowledge\tech_decision.md','docs\ai_memory\knowledge\pit_experience.md',
+  'docs\ai_memory\ui_spec\global.md','docs\ai_memory\ui_spec\component.md','docs\ai_memory\ui_spec\page.md','docs\ai_memory\ui_spec\workflow.md'
+)
+$structureRepairNeeded = $false
+foreach ($rel in $preflightLongDocs) {
+  $p = Join-Path $ProjectRoot $rel
+  if (-not (Test-Path $p)) { continue }
+  $c = Get-Content $p -Raw -Encoding UTF8
+  if ($c -notmatch '【归档分卷索引】' -or $c -notmatch '【修订记录】') { $structureRepairNeeded = $true; break }
+}
+if ($oldSkills.Count -eq 0 -and $oldDocs.Count -eq 0 -and -not $ebwExists -and $entryOldRefs.Count -eq 0 -and -not $structureRepairNeeded) { Write-Host "    未发现旧资产或结构缺口，无需迁移。"; exit 0 }
 
 # ---------- ② 建新文档，搬内容 ----------
 Step "② 创建新文档并搬入旧内容（复制，不移动）"
@@ -358,6 +394,22 @@ if ($DryRun) {
       Ok "project_state.json 的 handoff 指针已同步"
     } else { Write-Host "    project_state.json 无需要同步的旧指针。" }
   }
+}
+
+# ---------- ④ 备份下线（仅 -Archive 时执行） ----------
+# ---------- ⑧ 初始化后验：迁移后的长期文档必须满足 Baton 强制结构 ----------
+Step "⑧ 补齐并核验长期文档强制结构"
+$longDocs = $preflightLongDocs
+foreach ($rel in $longDocs) { Ensure-LongDocStructure (Join-Path $ProjectRoot $rel) $rel }
+if (-not $DryRun) {
+  $structureFailures = @()
+  foreach ($rel in $longDocs) {
+    $p = Join-Path $ProjectRoot $rel
+    if (-not (Test-Path $p)) { continue }
+    $c = Get-Content $p -Raw -Encoding UTF8
+    if ($c -notmatch '【归档分卷索引】' -or $c -notmatch '【修订记录】') { $structureFailures += $rel }
+  }
+  if ($structureFailures.Count -gt 0) { Write-Error "迁移后长期文档结构校验失败：$($structureFailures -join '、')"; exit 1 }
 }
 
 # ---------- ④ 备份下线（仅 -Archive 时执行） ----------

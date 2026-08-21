@@ -1,6 +1,6 @@
 ---
 name: baton
-description: '项目接力协作系统 Baton。跨 AI 软件（Claude Code/Codex/Cursor/DeepSeek Harness）与跨电脑接力维护同一项目的进度、记忆、Git 与模型分派。用户说「上班啦」「下班啦」「继续工作」「保存设计规范」「完成」「更新项目文档」「Baton init」「看看项目状态」「一键验收」「释放工作区」「记录需求变更」「这个坑记下来」「这个决策记下来」，回复任务编号，或进行 Git 自然语言请求（拉取github/同步github/看看git状态）时必须使用本技能。英文触发词等价（English triggers, identical meaning）: "clock in"/"start work", "clock out"/"end work", "continue work"/"resume", "save design spec", "complete task", "update project docs", "Baton init", "check project status", "run acceptance check", "release workspace", "add/change requirement", "pull github"/"sync github"/"check git status", "remember this pitfall"/"record this decision"。DeepSeek Harness 可用 baton_* 原生工具实现机械门禁；Codex、Cursor、Claude 没有这些工具时按 SKILL 内「无插件模式」与「平台能力」章节执行文件/Git 等价流程，并如实标明宿主级原子锁与身份核验会降级。Slogan: Pass your project, not your context.'
+description: '项目接力协作系统 Baton。跨 AI 软件（Claude Code/Codex/Cursor/DeepSeek Harness）与跨电脑接力维护同一项目的进度、记忆、Git 与模型分派。用户说「上班啦」「下班啦」「继续工作」「保存设计规范」「完成」「更新项目文档」「Baton init」「修复 Baton」「看看项目状态」「一键验收」「释放工作区」「记录需求变更」「这个坑记下来」「这个决策记下来」，回复任务编号，或进行 Git 自然语言请求（拉取github/同步github/看看git状态）时必须使用本技能。英文触发词等价（English triggers, identical meaning）: "clock in"/"start work", "clock out"/"end work", "continue work"/"resume", "save design spec", "complete task", "update project docs", "Baton init", "repair Baton", "check project status", "run acceptance check", "release workspace", "add/change requirement", "pull github"/"sync github"/"check git status", "remember this pitfall"/"record this decision"。DeepSeek Harness 可用 baton_* 原生工具实现机械门禁；Codex、Cursor、Claude 没有这些工具时按 SKILL 内「无插件模式」与「平台能力」章节执行文件/Git 等价流程，并如实标明宿主级原子锁与身份核验会降级。Slogan: Pass your project, not your context.'
 ---
 
 # Baton —— 项目接力协作系统
@@ -65,6 +65,7 @@ Baton 让不同 AI 软件在同一项目中串行接力工作，同时保持需�
 > | 任务验收通过 | "acceptance passed" / "accept" | baton_complete(action=accept) |
 > | 检查更新 | "check update" / "check for updates" | 读版本锚 + pwsh 实查远端版本对比 |
 > | 更新 Baton | "update baton" / "upgrade baton" | 按 source 分流执行更新 + 实查本地==远端 |
+> | 修复 Baton | "repair Baton" | 官方框架更新 → 用户级/项目级重装 → 非破坏迁移 → init/Doctor 后验 |
 
 ### 上班啦（clock in / start work）
 1. 用 baton_clock_in 做 fetch-before-lock、本地三查与任务表；**有 upstream 时，clock_in 必须由插件自身成功 fetch 后才判断 ahead/behind**。调用者提供的裸 `fetched_remote_sha` 已弃用并会阻断：SHA 相等不能证明本轮真实 fetch，也未绑定远端、分支、session 与 TTL。插件 fetch 失败时保持只读、不抢锁；无插件的 Codex、Cursor、Claude 由主会话直接执行 `git fetch <remote> --prune`，随后在同一事实快照中核对 tracking/ahead/behind，再进入手工等价流程。本地落后且无分叉时只允许 `git merge --ff-only`；同步完成前不得把任务表当开工依据。
@@ -110,8 +111,8 @@ Baton 让不同 AI 软件在同一项目中串行接力工作，同时保持需�
 用 baton_update_docs 把当前工作增量写入文档与交接后停止写入（中途存档，不跑下班流程）。
 
 ### Baton init
-初始化项目实例：见 baton_init 工具（自动生成骨架、检测旧 skill/旧文档、给出迁移计划，绝不覆盖已有文档）。
-**无插件等价**：运行 `pwsh -File scripts/baton-install.ps1 -Scope Project`（脚本随框架包分发，不在项目目录内；用户级安装的项目请从框架包目录运行该脚本，或先用插件 `baton_init` 生成骨架与提示、再由 install 脚本完成三端 SKILL 镜像与入口段；无插件也能装，见 README 安装章）。
+初始化项目实例：见 baton_init 工具。它生成骨架、检测旧 skill/旧文档，并在返回成功前执行接入 Doctor 后验：从真实 Git 自动探测 `origin` 与当前分支；配置仍为模板占位远端值、配置 remote 与真实 Git origin 不一致、分支不一致、Git 无可读 HEAD、长期文档缺【归档分卷索引】/【修订记录】、存在未迁移旧资产或找不到 Metrics 报告脚本时必须返回 FAIL，禁止宣称初始化完成。只允许修复明确模板占位或缺失结构，不覆盖用户已有有效配置与历史正文；写入配置前必须剥离远端 URL 中的凭据。
+**无插件等价**：从 Baton 框架包目录运行 `pwsh -File scripts/baton-install.ps1 -Scope Project -ProjectRoot <项目根>`（脚本不在业务项目 `scripts/` 内）。安装器会把真实报告脚本绝对路径写入项目 `.baton/version.json` 的 `report_script`，并在输出中显示初始化后验；出现阻断项时只能报告“脚手架已写入、初始化未完成”。旧项目迁移后必须运行 `scripts/baton-migrate.ps1` 的结构后验，再重跑安装或 Doctor。
 
 ### 数字确认（reply the number）
 任务表给出后，用户回复编号即确认选择：**编号 = 任务表 ID 列的值**，一一对应。插件模式必须调用 `baton_select(number=N, contract_level=FROZEN|BOUNDED|OPEN, ...)` 持久化：FROZEN/BOUNDED 同时传非空 `allowed_paths`；OPEN 同时传非空 `open_reason` 并等待宿主一次性授权。无插件模式手工更新 tasks.json 的 current_task_id/active_work/contract_level/allowed_paths/open_reason 与 task_progress 表，并执行同一人工门禁。持久化后直接按该任务执行。**禁止反问**「您指的是任务 1 吗」。
@@ -124,19 +125,25 @@ Baton 让不同 AI 软件在同一项目中串行接力工作，同时保持需�
 
 Baton 版本闭环：安装留版本锚、可检查、可更新。**用户不当运维**：检查/更新由 AI 按本口令全流程执行。
 
-1. **版本锚**：`baton-install.ps1` 安装时自动写 `version.json`——用户级在三端全局 skill 目录（与 SKILL.md 并列，如 `~/.agents/skills/baton/version.json`），项目级在 `.baton/version.json`（本机私有，gitignore）。字段：`source`（git/npm）、`version`、`sha`、`installed_at`、`last_check_at`。旧项目没有该文件 = 从未留痕，检查时视为「未知版本」，提示重跑 install 补锚。
+1. **版本锚**：`baton-install.ps1` 安装时自动写 `version.json`——用户级在三端全局 skill 目录（与 SKILL.md 并列，如 `~/.agents/skills/baton/version.json`），项目级在 `.baton/version.json`（本机私有，gitignore）。字段：`source`（git/npm）、`version`、`sha`、`report_script`（无插件 Metrics 脚本绝对路径）、`installed_at`、`last_check_at`。旧项目没有该文件或缺 `report_script` = 接入未完整留痕，提示重跑官方 install 补锚。
 2. **检查更新**（check update，只读动作）：读版本锚 → 用主会话 pwsh 实查远端（网络操作，插件沙箱受限）：
    - 版本号（首选，任何环境）：`npm view @kakadeka/dsh-baton version`（受限环境若报 npm-cache EPERM，加 `--cache <工作区内临时目录>`）
    - GitHub 通道：远端 SHA `git ls-remote https://github.com/kakadeka/Baton refs/heads/master`；版本号备选 `(Invoke-RestMethod https://raw.githubusercontent.com/kakadeka/Baton/master/package.json).version`（或 `git ls-remote ... refs/tags/v*` 看 tag 列表）
    - 与本地 `version.json` 对比 → 报告「已是最新 vX.Y.Z / 有新版 vX.Y.Z（本地 vA.B.C）」。
    - **check 本身零写入**：不自动回写 `last_check_at`。报告后提示用户「是否记录本次检查时间（回写 last_check_at 至两处版本锚）」——用户明确同意才回写（显式 record-check），保持「检查=只读」的承诺。
 3. **更新 Baton**（update baton）：检查发现新版，用户确认后执行，按 source 分流：
-   - skill 用户（Claude/Codex/Cursor，source=git）：`git -C $HOME\Baton pull`（框架副本）；**pull 报 unrelated histories / 分叉失败 = 历史不连续的旧克隆，删除后重新 `git clone https://github.com/kakadeka/Baton.git $HOME\Baton`**；无副本则直接 clone → 重跑 `pwsh -File $HOME\Baton\scripts\baton-install.ps1 -Scope User`（更新三端全局 skill）→ 对相关项目重跑 `-Scope Project`（更新 SKILL 镜像/入口段，脚本幂等）→ install 自动刷新版本锚。
-   - DSH 用户（source=npm）：dsh 部署目录内 `npm update @kakadeka/dsh-baton` → 重启 dsh web。
-   - 更新后提示：SKILL 变更新会话生效（DSH 内当前会话的 skill 已加载，下个会话生效）；DSH 组合包变更重启后生效。
-4. **假更新红线**：更新后必须实查本地==远端才可宣称完成——skill：三端/项目 SKILL.md 版本锚 version 与远端一致；npm：`npm list @kakadeka/dsh-baton` 输出与远端一致。实查不符 = 更新失败，如实报告，不重试硬凑。
-5. **上班提示**：见「上班啦」第 5 条——超 `config.update.check_interval_days`（默认 7 天）未检查时提示，clock_in 纯本地判断、不做网络。
-6. **无插件等价**：手工读 `version.json` → pwsh 实查远端（同上命令）→ 对比报告；更新按 source 分流手工执行；更新后同样实查本地==远端才可宣称完成。
+   - skill 用户（Claude/Codex/Cursor，source=git）：框架副本只允许 `git -C <framework_root> pull --ff-only`。分叉、unrelated histories、dirty 或来源不可信时立即停止，绝不删除/覆盖原框架副本；需要重取时先把精确目录移动到带时间戳的可恢复备份，再 clone，且该外部目录变更必须得到本轮明确授权。更新源码后重跑 `baton-install.ps1 -Scope User` 更新三端全局 Skill，再对当前业务项目重跑 `-Scope Project -ProjectRoot <项目根>` 更新项目镜像、配置 schema 与版本锚。
+   - DSH 用户（source=npm）：在已确认的 DSH 部署目录执行 `npm update @kakadeka/dsh-baton`，核对 `npm list` 后重启对应 profile；禁止在业务项目随意 `npm install` Baton 试图修框架 Bug。
+   - 更新后新建 AI 会话；当前会话可能仍持有旧 Skill 文本，不能用它自证新版已生效。
+4. **项目修复闭环（修复 Baton / repair Baton）**：这是业务项目处理 Baton 上游 Bug 的唯一官方口令，不是让业务项目修改框架源码。依次执行：
+   1. 按第 2–3 条检查并更新官方 Baton 来源；若官方尚无包含该修复的版本，明确报告“等待 Baton 发布”，停止在业务项目打补丁。
+   2. 重跑用户级安装，再对当前项目重跑项目级安装；安装器自动刷新三端项目 Skill、config schema、版本锚和 `report_script`。
+   3. 若安装/init 报旧资产或长期文档结构缺口，只运行官方 `baton-migrate.ps1 -ProjectRoot <项目根>`（默认不加 `-Archive`，不删除历史），随后重跑项目级安装。
+   4. 执行 `Baton init` 接入后验和 `baton-doctor`/一键验收；必须确认真实 Git origin/当前分支、无占位配置、长期文档结构完整、报告脚本存在、三端 Skill 与官方版本一致。
+   5. 全部通过后才报告修复完成；不修改业务代码、不伪造历史 Metrics、不让业务项目维护 Baton 的第二套源码。
+5. **假更新红线**：更新后必须实查：官方来源版本/提交、三端全局与项目 Skill 镜像、项目 `.baton/version.json`、`report_script`、Git origin/分支和 init/Doctor 结果全部一致。只看到版本号变化、只更新全局 Skill、或只重跑 `Baton init` 都不算完成。
+6. **上班提示**：见「上班啦」第 5 条——超 `config.update.check_interval_days`（默认 7 天）未检查时提示，clock_in 纯本地判断、不做网络。
+7. **无插件等价**：手工读 `version.json` → pwsh 实查官方来源 → `pull --ff-only`/npm update → 用户级安装 → 当前项目级安装 → 必要时非破坏迁移 → 新会话执行 init/Doctor。任何一步证据不足都必须 FAIL。
 
 ### 记入记忆（remember this pitfall / record this decision，自然语言）
 「这个坑记下来」「把这个决策记进知识库」「记个 issue」→ baton_remember（decision/pit/issue）。记忆是长期资产：换 AI、换电脑后靠 baton_memory_query 命中，禁止重新解释或重复踩坑。
@@ -209,12 +216,12 @@ Baton 版本闭环：安装留版本锚、可检查、可更新。**用户不当
 Codex、Claude Code、Cursor 或其它没有 `baton_*` 工具的宿主，使用仓库脚本完成同一协议；模型参数只能来自当前宿主本轮真实分派配置：
 
 ```powershell
-node scripts/baton-report.mjs --project <项目绝对路径> --record-start --task-id <任务ID> --task-name <任务名称> --host-id <codex|claude|cursor|其它当前宿主> --executor-id <执行代理ID> --run-id <宿主运行ID> --model <本次请求模型或host-default> --effort <本次请求档位> --source requested
-node scripts/baton-report.mjs --project <项目绝对路径> --record-end --task-id <任务ID> --attempt-id <上一步返回值> --result <succeeded|needs_revision|failed|cancelled> --duration-ms <宿主显示的准确耗时>
-node scripts/baton-report.mjs --project <项目绝对路径> --sync-local
+node <.baton/version.json.report_script> --project <项目绝对路径> --record-start --task-id <任务ID> --task-name <任务名称> --host-id <codex|claude|cursor|其它当前宿主> --executor-id <执行代理ID> --run-id <宿主运行ID> --model <本次请求模型或host-default> --effort <本次请求档位> --source requested
+node <.baton/version.json.report_script> --project <项目绝对路径> --record-end --task-id <任务ID> --attempt-id <上一步返回值> --result <succeeded|needs_revision|failed|cancelled> --duration-ms <宿主显示的准确耗时>
+node <.baton/version.json.report_script> --project <项目绝对路径> --sync-local
 ```
 
-`record-start` 必须在派发动作发生时执行并保存返回的 `attempt_id`；`record-end` 必须在宿主返回执行结果时执行。宿主已经显示准确耗时时必须传 `duration-ms`；只有宿主未提供时，脚本才按同一 attempt 的开始/结束时间计算。`sync-local` 由完成、更新项目文档、下班自动触发，不要求用户手工运行。
+先读取项目 `.baton/version.json.report_script`，确认该绝对路径真实存在；禁止只在业务项目的 `scripts/` 目录猜找。字段缺失或路径不存在时，初始化/下班必须 FAIL，并提示从 Baton 框架目录重跑项目级安装补锚。`record-start` 必须在派发动作发生时执行并保存返回的 `attempt_id`；`record-end` 必须在宿主返回执行结果时执行。宿主已经显示准确耗时时必须传 `duration-ms`；只有宿主未提供时，脚本才按同一 attempt 的开始/结束时间计算。`sync-local` 由完成、更新项目文档、下班自动触发，不要求用户手工运行。
 
 ### 宿主原生轻量映射
 
